@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "UK49s Historical Results"
+description = "A production-ready UK49s historical results scraper and data API for retrieving validated Lunch and Tea draw records from 1997 to the present."
+version = "1.0.0"
+id = "artifacts/uk49s-scraper"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18551
+
+[services.development]
+run = "pnpm --filter @workspace/uk49s-scraper run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/uk49s-scraper", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/uk49s-scraper/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18551"
+BASE_PATH = "/"

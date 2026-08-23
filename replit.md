@@ -1,6 +1,6 @@
-# [Project name]
+# UK49s Historical Results
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Standalone UK49s historical-results scraper and console for validated Lunch and Tea draw data.
 
 ## Run & Operate
 
@@ -22,15 +22,21 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/api-server/src/lib/uk49s-scraper.ts` — fetch, parse, validate, deduplicate, sort, cache, and diagnostics.
+- `artifacts/api-server/src/routes/scrape.ts` — scraper and health routes.
+- `artifacts/uk49s-scraper/src/pages/home.tsx` — collection console and exports.
+- `lib/api-spec/openapi.yaml` — API source of truth.
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- The scraper is intentionally independent of prediction, AI, optimization, and backtesting logic.
+- Results are cached in memory for 15 minutes; `forceRefresh=true` bypasses the cache.
+- The archive is parsed with row-level HTML fallbacks to tolerate small markup changes.
+- PostgreSQL is not required because this app returns source data on demand and keeps the product standalone.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+The console supports Lunch, Tea, Both, year, year-range, and full-history collection with JSON/CSV exports and visible quality diagnostics.
 
 ## User preferences
 

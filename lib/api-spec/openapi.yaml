@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: scraper
+    description: UK49s historical result scraping operations
 paths:
   /healthz:
     get:
@@ -24,7 +26,118 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /health:
+    get:
+      operationId: getScraperHealth
+      tags: [health]
+      summary: Scraper service health
+      responses:
+        "200":
+          description: Service health
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScraperHealth"
+  /scrape/{drawType}/{year}:
+    get:
+      operationId: scrapeDrawTypeYear
+      tags: [scraper]
+      summary: Scrape one draw type for one year
+      parameters:
+        - $ref: "#/components/parameters/DrawType"
+        - $ref: "#/components/parameters/Year"
+        - $ref: "#/components/parameters/ForceRefresh"
+      responses:
+        "200":
+          description: Scraped historical results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScrapeResponse"
+        "400":
+          description: Invalid parameters
+  /scrape/lunchtime/{year}:
+    get:
+      operationId: scrapeLunchtimeYear
+      tags: [scraper]
+      summary: Scrape UK49s Lunchtime for a year
+      parameters:
+        - $ref: "#/components/parameters/Year"
+        - $ref: "#/components/parameters/ForceRefresh"
+      responses:
+        "200":
+          description: Scraped historical results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScrapeResponse"
+  /scrape/teatime/{year}:
+    get:
+      operationId: scrapeTeatimeYear
+      tags: [scraper]
+      summary: Scrape UK49s Teatime for a year
+      parameters:
+        - $ref: "#/components/parameters/Year"
+        - $ref: "#/components/parameters/ForceRefresh"
+      responses:
+        "200":
+          description: Scraped historical results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScrapeResponse"
+  /scrape/all/{year}:
+    get:
+      operationId: scrapeAllYear
+      tags: [scraper]
+      summary: Scrape both draw types for one year
+      parameters:
+        - $ref: "#/components/parameters/Year"
+        - $ref: "#/components/parameters/ForceRefresh"
+      responses:
+        "200":
+          description: Combined scraped historical results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScrapeResponse"
+  /scrape/all:
+    get:
+      operationId: scrapeAllYears
+      tags: [scraper]
+      summary: Scrape both draw types from 1997 to the current year
+      parameters:
+        - $ref: "#/components/parameters/ForceRefresh"
+      responses:
+        "200":
+          description: Combined scraped historical results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScrapeResponse"
 components:
+  parameters:
+    DrawType:
+      name: drawType
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [lunchtime, teatime]
+    Year:
+      name: year
+      in: path
+      required: true
+      schema:
+        type: number
+        minimum: 1997
+        maximum: 2100
+    ForceRefresh:
+      name: forceRefresh
+      in: query
+      required: false
+      schema:
+        type: boolean
   schemas:
     HealthStatus:
       type: object
@@ -33,4 +146,70 @@ components:
           type: string
       required:
         - status
+    ScraperHealth:
+      type: object
+      required: [status, service, cacheEntries, lastScrapeAt]
+      properties:
+        status:
+          type: string
+        service:
+          type: string
+        cacheEntries:
+          type: number
+        lastScrapeAt:
+          type: ["string", "null"]
+          format: date-time
+    DrawResult:
+      type: object
+      required: [draw_date, draw_type, winning_numbers, booster_ball]
+      properties:
+        draw_date:
+          type: string
+        draw_type:
+          type: string
+          enum: [lunchtime, teatime]
+        winning_numbers:
+          type: array
+          minItems: 6
+          maxItems: 6
+          items: { type: number, minimum: 1, maximum: 49 }
+        booster_ball:
+          type: number
+          minimum: 1
+          maximum: 49
+    ScrapeResponse:
+      type: object
+      required: [success, drawType, year, source, count, results, stats]
+      properties:
+        success: { type: boolean }
+        drawType:
+          type: string
+        year:
+          type: number
+        source:
+          type: string
+        count:
+          type: number
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/DrawResult" }
+        stats:
+          $ref: "#/components/schemas/ScrapeStats"
+    ScrapeStats:
+      type: object
+      required: [urlsRequested, recordsDiscovered, recordsAccepted, duplicatesRemoved, recordsRejected, parsingErrors, failedUrls, fromCache]
+      properties:
+        urlsRequested: { type: number }
+        recordsDiscovered: { type: number }
+        recordsAccepted: { type: number }
+        duplicatesRemoved: { type: number }
+        recordsRejected: { type: number }
+        parsingErrors: { type: number }
+        failedUrls:
+          type: array
+          items: { type: string }
+        validationErrors:
+          type: array
+          items: { type: string }
+        fromCache: { type: boolean }
 

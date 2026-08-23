@@ -1,0 +1,1 @@
+- [UK49s source format](uk49s-source-format.md) — archive rows use weekday ordinals and seven ball items, with fallback parsing only when rows are absent.
