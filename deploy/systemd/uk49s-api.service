@@ -1,0 +1,28 @@
+[Unit]
+Description=UK49s Platform API Server
+Documentation=https://uk.lottonumbers.com
+After=network.target
+
+[Service]
+Type=simple
+User=uk49s
+Group=uk49s
+WorkingDirectory=/opt/uk49s
+EnvironmentFile=/opt/uk49s/.env
+ExecStart=/usr/bin/node /opt/uk49s/artifacts/api-server/dist/index.mjs
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=uk49s-api
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/uk49s
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
