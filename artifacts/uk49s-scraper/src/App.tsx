@@ -14,6 +14,7 @@ import OptimizerPage from '@/pages/dashboard/Optimizer';
 import PerformancePage from '@/pages/dashboard/Performance';
 import SettingsPage from '@/pages/dashboard/Settings';
 import DrawTypePage from '@/pages/dashboard/DrawType';
+import LabPage from '@/pages/dashboard/Lab';
 import {
   Route,
   Switch,
@@ -42,6 +43,7 @@ function DashboardRoutes() {
         <Route path="/dashboard/teatime" component={TeatimePage} />
         <Route path="/dashboard/predictions" component={PredictionsPage} />
         <Route path="/dashboard/backtest" component={BacktestPage} />
+        <Route path="/dashboard/lab" component={LabPage} />
         <Route path="/dashboard/optimizer" component={OptimizerPage} />
         <Route path="/dashboard/performance" component={PerformancePage} />
         <Route path="/dashboard/settings" component={SettingsPage} />
