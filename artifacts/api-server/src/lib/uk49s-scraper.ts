@@ -111,13 +111,16 @@ function candidateTexts(html: string) {
       }
     }
   }
-  return [...new Set(candidates)];
+  const unique = [...new Set(candidates)];
+  return { texts: unique, exactDuplicates: candidates.length - unique.length };
 }
 
 export function parseRecords(html: string, drawType: DrawType, year: number, stats: ScrapeStats) {
   const results: DrawResult[] = [];
   const seen = new Set<string>();
-  for (const text of candidateTexts(html)) {
+  const { texts, exactDuplicates } = candidateTexts(html);
+  stats.duplicatesRemoved += exactDuplicates;
+  for (const text of texts) {
     const date = parseDate(text, year);
     if (!date) continue;
     stats.recordsDiscovered += 1;

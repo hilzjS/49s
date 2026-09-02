@@ -6,7 +6,21 @@
     "preinstall": "sh -c 'rm -f package-lock.json yarn.lock; case \"$npm_config_user_agent\" in pnpm/*) ;; *) echo \"Use pnpm instead\" >&2; exit 1 ;; esac'",
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
     "typecheck:libs": "tsc --build",
-    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
+    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
+    "dev": "pnpm run build && pnpm --filter @workspace/api-server run dev",
+    "dev:scraper": "pnpm --filter @workspace/uk49s-scraper run dev",
+    "dev:api": "pnpm --filter @workspace/api-server run dev",
+    "db:migrate": "pnpm --filter @workspace/db run push",
+    "db:generate": "pnpm --filter @workspace/db run push",
+    "test": "pnpm --filter @workspace/api-server run test",
+    "test:watch": "pnpm --filter @workspace/api-server run test:watch",
+    "scrape:uk49s": "curl -s -X POST http://localhost:3000/api/data/ingest -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${ADMIN_API_KEY:-}\" -d '{\"year\": 2015}'",
+    "ingest:uk49s": "curl -s -X POST http://localhost:3000/api/data/ingest -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${ADMIN_API_KEY:-}\" -d '{\"startYear\": 2015, \"endYear\": 2026}'",
+    "verify:uk49s": "pnpm run test && pnpm run typecheck",
+    "backtest:uk49s": "curl -s -X POST http://localhost:3000/api/backtest/run -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${ADMIN_API_KEY:-}\" -d '{\"drawType\": \"lunchtime\", \"lookbackWindow\": 90, \"testStartDate\": \"2024-01-01\", \"testEndDate\": \"2024-12-31\"}'",
+    "optimize:uk49s": "curl -s -X POST http://localhost:3000/api/optimizer/run -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${ADMIN_API_KEY:-}\" -d '{\"drawType\": \"lunchtime\", \"validationStartDate\": \"2023-01-01\", \"validationEndDate\": \"2023-12-31\", \"populationSize\": 30, \"eliteSize\": 3, \"minValidationSamples\": 100}'",
+    "predict:uk49s": "curl -s -X POST http://localhost:3000/api/predictions/generate -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${ADMIN_API_KEY:-}\" -d '{\"drawType\": \"lunchtime\"}'",
+    "update:uk49s": "curl -s -X POST http://localhost:3000/api/data/ingest -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${ADMIN_API_KEY:-}\" -d '{\"drawType\": \"latest\"}'"
   },
   "private": true,
   "dependencies": {
