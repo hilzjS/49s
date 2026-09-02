@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { adminFetch } from '@/lib/admin';
 import {
   AlertTriangle,
   FlaskConical,
@@ -138,13 +139,10 @@ export default function LabPage() {
     setError(null);
     try {
       const url = kind === 'booster' ? '/api/experiments/booster' : '/api/experiments/run';
-      const res = await fetch(url, {
+      await adminFetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ drawType: activeTab, kind, lookbackWindow: 90, randomSeed: 42 }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Experiment failed');
       await loadRuns();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Experiment failed');

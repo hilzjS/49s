@@ -106,12 +106,15 @@ function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
           <button className="sidebar-item sidebar-item-active" data-testid="button-nav-console">
             <LayoutDashboard size={17} /><span>Scrape console</span><span className="nav-kicker">01</span>
           </button>
-          <button className="sidebar-item" data-testid="button-nav-history">
-            <History size={17} /><span>Run history</span><span className="nav-kicker">—</span>
-          </button>
-          <button className="sidebar-item" data-testid="button-nav-data">
-            <Database size={17} /><span>Data quality</span><span className="nav-kicker">—</span>
-          </button>
+          <a href="/dashboard" className="sidebar-item" data-testid="button-nav-dashboard" style={{ textDecoration: 'none' }}>
+            <BarChart3 size={17} /><span>Platform dashboard</span><span className="nav-kicker">→</span>
+          </a>
+          <a href="/dashboard/data" className="sidebar-item" data-testid="button-nav-history" style={{ textDecoration: 'none' }}>
+            <History size={17} /><span>Run history</span><span className="nav-kicker">→</span>
+          </a>
+          <a href="/dashboard/data" className="sidebar-item" data-testid="button-nav-data" style={{ textDecoration: 'none' }}>
+            <Database size={17} /><span>Data quality</span><span className="nav-kicker">→</span>
+          </a>
         </nav>
 
         <div className="sidebar-lower">
@@ -129,7 +132,7 @@ function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
   );
 }
 
-function ScrapeForm({ onRun, running }: { onRun: (mode: DrawMode, range: RangeMode, year: number, endYear: number) => void; running: boolean }) {
+function ScrapeForm({ onRun, onIngest, running, ingestRunning }: { onRun: (mode: DrawMode, range: RangeMode, year: number, endYear: number) => void; onIngest: (mode: DrawMode, range: RangeMode, year: number, endYear: number) => void; running: boolean; ingestRunning: boolean }) {
   const [mode, setMode] = useState<DrawMode>('both');
   const [range, setRange] = useState<RangeMode>('single');
   const [year, setYear] = useState(currentYear - 1);
@@ -209,10 +212,16 @@ function ScrapeForm({ onRun, running }: { onRun: (mode: DrawMode, range: RangeMo
           <span className="summary-dot" />
           <span>{range === 'all' ? 'Long-running collection' : `${mode === 'both' ? '2 draw types' : '1 draw type'} · ${range === 'range' ? `${year}–${endYear}` : year}`}</span>
         </div>
-        <button className="run-button" onClick={() => onRun(mode, range, year, endYear)} disabled={running} data-testid="button-run-scrape">
-          {running ? <RefreshCw size={17} className="spin" /> : <Play size={17} fill="currentColor" />}
-          <span>{running ? 'Collecting…' : 'Run collection'}</span>
-        </button>
+        <div className="console-button-group">
+          <button className="run-button" onClick={() => onRun(mode, range, year, endYear)} disabled={running || ingestRunning} data-testid="button-run-scrape">
+            {running ? <RefreshCw size={17} className="spin" /> : <Play size={17} fill="currentColor" />}
+            <span>{running ? 'Collecting…' : 'Run collection'}</span>
+          </button>
+          <button className="run-button run-button-ingest" onClick={() => onIngest(mode, range, year, endYear)} disabled={running || ingestRunning} data-testid="button-ingest" title="Scrape and store into the database (requires admin key)">
+            {ingestRunning ? <RefreshCw size={17} className="spin" /> : <Database size={17} />}
+            <span>{ingestRunning ? 'Ingesting…' : 'Ingest to database'}</span>
+          </button>
+        </div>
       </div>
     </section>
   );
@@ -345,6 +354,40 @@ export default function Home() {
   useScrapeAllYear(hookYear, { forceRefresh: false }, { query: { enabled: false, queryKey: getScrapeAllYearQueryKey(hookYear, { forceRefresh: false }) } });
   useScrapeAllYears({ forceRefresh: false }, { query: { enabled: false, queryKey: getScrapeAllYearsQueryKey({ forceRefresh: false }) } });
 
+  const [ingestRunning, setIngestRunning] = useState(false);
+  const [ingestMessage, setIngestMessage] = useState<string | null>(null);
+
+  const runIngest = async (mode: DrawMode, range: RangeMode, year: number, endYear: number) => {
+    setIngestRunning(true);
+    setIngestMessage(null);
+    setRunError(null);
+    try {
+      const body: Record<string, unknown> = {};
+      if (range === 'all') {
+        body.startYear = 2015;
+        body.endYear = currentYear;
+      } else if (range === 'range') {
+        body.startYear = year;
+        body.endYear = endYear;
+      } else {
+        body.year = year;
+      }
+      if (mode !== 'both') body.drawType = mode;
+      const { adminFetch } = await import('@/lib/admin');
+      const result = await adminFetch<{ totalImported?: number; totalSkipped?: number; imported?: number; skipped?: number }>('/api/data/ingest', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      const imported = result.totalImported ?? result.imported ?? 0;
+      const skipped = result.totalSkipped ?? result.skipped ?? 0;
+      setIngestMessage(`Ingestion complete: ${imported} imported, ${skipped} skipped (already in database).`);
+    } catch (e) {
+      setRunError(e instanceof Error ? e.message : 'Ingestion failed. Check the admin key in Settings.');
+    } finally {
+      setIngestRunning(false);
+    }
+  };
+
   const runCollection = async (mode: DrawMode, range: RangeMode, year: number, endYear: number) => {
     setRunning(true);
     setRunError(null);
@@ -400,7 +443,7 @@ export default function Home() {
         <div className="content-wrap">
           <div className="page-intro">
             <div><div className="overline"><span className="overline-line" /> DATA COLLECTION / UK49S</div><h1>Historical results,<br /><em>without the guesswork.</em></h1><p>Run a controlled collection against the UK49s archive. Every accepted draw is checked, traceable, and ready for downstream systems.</p></div>
-            <div className="intro-aside"><div className="archive-stamp"><span>ARCHIVE</span><strong>49</strong><small>DRAW RECORDS</small></div><div><span className="aside-label">Last run</span><strong data-testid="text-last-run">{lastRun ? formatDate(lastRun) : 'No run this session'}</strong></div></div>
+            <div className="intro-aside"><div className="archive-stamp"><span>ARCHIVE</span><strong>49</strong><small>DRAW RECORDS</small></div><div><span className="aside-label">Last run</span><strong data-testid="text-last-run">{lastRun ? formatDate(lastRun) : 'No run this session'}</strong></div><a href="/dashboard" className="btn btn-primary dashboard-cta" data-testid="button-open-dashboard"><BarChart3 size={16} /> Open full platform</a></div>
           </div>
           <div className="stat-grid">
             <StatTile label="Available from" value="1997" hint="First indexed draw" accent="blue" />
@@ -408,9 +451,10 @@ export default function Home() {
             <StatTile label="Number range" value="01—49" hint="Six + booster ball" accent="coral" />
             <StatTile label="Current status" value={health.data?.status === 'ok' ? 'Ready' : 'Checking'} hint={health.data?.lastScrapeAt ? `Updated ${formatDate(health.data.lastScrapeAt)}` : 'Polling service'} accent="yellow" />
           </div>
+          {ingestMessage && <div className="ingest-success" role="status" data-testid="text-ingest-result"><Check size={18} /><span>{ingestMessage}</span><button onClick={() => setIngestMessage(null)} aria-label="Dismiss message" data-testid="button-dismiss-ingest"><X size={16} /></button></div>}
           {runError && <div className="run-error" role="alert" data-testid="error-scrape-run"><AlertCircle size={18} /><span>{runError}</span><button onClick={() => setRunError(null)} aria-label="Dismiss error" data-testid="button-dismiss-error"><X size={16} /></button></div>}
           <div className="workspace-grid">
-            <div className="workspace-main"><ScrapeForm onRun={runCollection} running={running} /><ResultTable results={results} loading={running} /></div>
+            <div className="workspace-main"><ScrapeForm onRun={runCollection} onIngest={runIngest} running={running} ingestRunning={ingestRunning} /><ResultTable results={results} loading={running} /></div>
             <div className="workspace-side"><HealthCard health={health.data} loading={health.isLoading} error={health.isError} onRetry={() => health.refetch()} /><QualityPanel response={response} /></div>
           </div>
           <DownloadButtons results={results} />

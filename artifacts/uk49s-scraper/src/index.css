@@ -386,6 +386,9 @@
   --coral: #c44651;
   --teal: #397f88;
   --side: #292d43;
+  /* Dashboard aliases */
+  --surface: #fbfaf6;
+  --amber: #f8c84d;
 }
 
 * { box-sizing: border-box; }
@@ -1722,3 +1725,21 @@ tbody tr:hover { background: #f8f5ec; }
     grid-template-columns: 1fr;
   }
 }
+
+/* Landing page dashboard CTA */
+.dashboard-cta { margin-top: 16px; display: inline-flex; }
+.intro-aside { display: flex; flex-direction: column; align-items: flex-end; gap: 12px; }
+.sidebar-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; color: inherit; cursor: pointer; }
+
+/* Console button group + ingest */
+.console-button-group { display: flex; gap: 10px; }
+.run-button-ingest { background: var(--paper-bright); color: var(--ink); border: 1px solid var(--ink); }
+.run-button-ingest:hover { opacity: 0.9; }
+.ingest-success {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 18px; margin-bottom: 20px;
+  background: #d4edda; color: #155724;
+  border: 1px solid #c3e6cb; border-radius: 12px;
+  font-size: 13px; font-weight: 500;
+}
+.ingest-success button { margin-left: auto; background: none; border: none; cursor: pointer; color: inherit; }

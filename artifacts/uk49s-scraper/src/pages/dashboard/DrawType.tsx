@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
+import { adminFetch } from '@/lib/admin';
 import {
+  AlertTriangle,
   CalendarDays,
   RefreshCw,
   Target,
@@ -52,6 +54,7 @@ export default function DrawTypePage({ drawType, title, subtitle }: Props) {
   const [history, setHistory] = useState<PredictionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchAll();
@@ -79,17 +82,17 @@ export default function DrawTypePage({ drawType, title, subtitle }: Props) {
 
   async function generate() {
     setGenerating(true);
+    setActionError(null);
     try {
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
-      await fetch('/api/predictions/generate', {
+      await adminFetch('/api/predictions/generate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ drawType, predictionDate: tomorrow.toISOString().split('T')[0] }),
       });
       await fetchAll();
     } catch (e) {
-      console.error(e);
+      setActionError(e instanceof Error ? e.message : 'Failed to generate prediction');
     } finally {
       setGenerating(false);
     }
@@ -149,6 +152,12 @@ export default function DrawTypePage({ drawType, title, subtitle }: Props) {
 
       {/* Latest Prediction */}
       <section className="section">
+        {actionError && (
+          <div className="alert alert-error" style={{ marginBottom: 16 }}>
+            <AlertTriangle size={18} />
+            <span>{actionError}</span>
+          </div>
+        )}
         <div className="section-header">
           <h2 className="section-title"><Target size={20} />Latest Prediction</h2>
           <button className="btn btn-primary" onClick={generate} disabled={generating}>

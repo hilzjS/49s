@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { adminFetch } from '@/lib/admin';
 import {
   AlertTriangle,
   Calendar,
@@ -106,6 +107,7 @@ export default function PredictionsPage() {
   const [latestTea, setLatestTea] = useState<PredictionInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'lunchtime' | 'teatime'>('lunchtime');
 
   useEffect(() => {
@@ -143,22 +145,19 @@ export default function PredictionsPage() {
 
   async function generatePrediction(drawType: 'lunchtime' | 'teatime') {
     setGenerating(drawType);
+    setActionError(null);
     try {
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
       const dateStr = tomorrow.toISOString().split('T')[0];
-      
-      const res = await fetch('/api/predictions/generate', {
+
+      await adminFetch('/api/predictions/generate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ drawType, predictionDate: dateStr }),
       });
-      
-      if (res.ok) {
-        await fetchPredictions();
-      }
+      await fetchPredictions();
     } catch (e) {
-      console.error('Failed to generate prediction:', e);
+      setActionError(e instanceof Error ? e.message : 'Failed to generate prediction');
     } finally {
       setGenerating(null);
     }
@@ -225,6 +224,12 @@ export default function PredictionsPage() {
 
       {/* Latest Prediction */}
       <section className="section">
+        {actionError && (
+          <div className="alert alert-error">
+            <AlertTriangle size={18} />
+            <span>{actionError}</span>
+          </div>
+        )}
         <div className="section-header">
           <h2 className="section-title">
             <Target size={20} />

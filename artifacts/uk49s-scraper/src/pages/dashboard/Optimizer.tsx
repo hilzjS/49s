@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { adminFetch } from '@/lib/admin';
 import {
   AlertTriangle,
   FlaskConical,
@@ -96,13 +97,10 @@ export default function OptimizerPage() {
     setError(null);
     setResult(null);
     try {
-      const res = await fetch('/api/optimizer/run', {
+      const data = await adminFetch<Record<string, unknown>>('/api/optimizer/run', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ drawType: activeTab, ...config }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Optimization failed');
       setResult(data);
       await fetchData();
     } catch (e) {
