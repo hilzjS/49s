@@ -3,12 +3,14 @@ import {
   AlertTriangle,
   CheckCircle,
   Globe,
+  KeyRound,
   RefreshCw,
   Server,
   Settings,
   ShieldCheck,
   XCircle,
 } from 'lucide-react';
+import { getAdminKey, setAdminKey } from '@/lib/admin';
 
 interface ScraperHealth {
   status: string;
@@ -20,6 +22,8 @@ interface ScraperHealth {
 export default function SettingsPage() {
   const [health, setHealth] = useState<ScraperHealth | null>(null);
   const [apiOk, setApiOk] = useState<boolean | null>(null);
+  const [adminKey, setAdminKeyValue] = useState<string>(getAdminKey() ?? '');
+  const [keySaved, setKeySaved] = useState(false);
 
   useEffect(() => {
     async function check() {
@@ -113,6 +117,43 @@ export default function SettingsPage() {
               <tr><td className="type-cell">Cache TTL</td><td>15 minutes</td><td>Reduces load on source site</td></tr>
             </tbody>
           </table>
+        </div>
+      </section>
+
+      <section className="section">
+        <h2 className="section-title"><KeyRound size={20} />Admin API Key</h2>
+        <div className="panel">
+          <p style={{ margin: '0 0 12px', fontSize: 13, opacity: 0.7 }}>
+            Action buttons (Run Backtest, Run Optimization, Generate Prediction, Run Ablation, Ingest)
+            call admin-protected endpoints. Enter the server's <code>ADMIN_API_KEY</code> here to enable them.
+            The key is stored only in this browser's localStorage and sent as an
+            <code> Authorization: Bearer </code> header on same-origin API calls.
+          </p>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+            <input
+              type="password"
+              value={adminKey}
+              onChange={(e) => { setAdminKeyValue(e.target.value); setKeySaved(false); }}
+              placeholder="Enter admin API key"
+              style={{ flex: 1, maxWidth: 420, padding: '10px 14px', fontSize: 14, border: '1px solid var(--line)', borderRadius: 8, background: 'var(--surface)', color: 'var(--ink)' }}
+            />
+            <button
+              className="btn btn-primary"
+              onClick={() => { setAdminKey(adminKey || null); setKeySaved(true); }}
+            >
+              Save key
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={() => { setAdminKeyValue(''); setAdminKey(null); setKeySaved(false); }}
+            >
+              Clear
+            </button>
+            {keySaved && <span style={{ color: '#155724', fontSize: 13 }}><CheckCircle size={14} style={{ verticalAlign: -2 }} /> Saved</span>}
+          </div>
+          <p style={{ margin: '12px 0 0', fontSize: 12, opacity: 0.5 }}>
+            Status: {getAdminKey() ? 'Key configured — action buttons are enabled' : 'No key — action buttons will show an auth error'}
+          </p>
         </div>
       </section>
 

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { adminFetch } from '@/lib/admin';
 import {
   AlertTriangle,
   BarChart3,
@@ -132,6 +133,7 @@ export default function BacktestPage() {
   const [history, setHistory] = useState<BacktestRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'lunchtime' | 'teatime'>('lunchtime');
   const [config, setConfig] = useState({
     lookbackWindow: 90,
@@ -174,21 +176,15 @@ export default function BacktestPage() {
 
   async function runBacktest(drawType: 'lunchtime' | 'teatime') {
     setRunning(true);
+    setActionError(null);
     try {
-      const res = await fetch('/api/backtest/run', {
+      await adminFetch('/api/backtest/run', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          drawType,
-          ...config,
-        }),
+        body: JSON.stringify({ drawType, ...config }),
       });
-      
-      if (res.ok) {
-        await fetchBacktests();
-      }
+      await fetchBacktests();
     } catch (e) {
-      console.error('Failed to run backtest:', e);
+      setActionError(e instanceof Error ? e.message : 'Failed to run backtest');
     } finally {
       setRunning(false);
     }
@@ -241,6 +237,12 @@ export default function BacktestPage() {
           Backtest Configuration
         </h2>
         
+        {actionError && (
+          <div className="alert alert-error" style={{ marginBottom: 16 }}>
+            <AlertTriangle size={18} />
+            <span>{actionError}</span>
+          </div>
+        )}
         <div className="panel config-panel">
           <div className="config-grid">
             <div className="config-field">

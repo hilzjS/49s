@@ -39,6 +39,7 @@ const navItems: NavItem[] = [
   { path: '/dashboard/teatime', label: 'Teatime', icon: Moon },
   { path: '/dashboard/predictions', label: 'Predictions', icon: Target },
   { path: '/dashboard/backtest', label: 'Backtest', icon: GitCompareArrows },
+  { path: '/dashboard/lab', label: 'Experiment Lab', icon: FlaskConical },
   { path: '/dashboard/optimizer', label: 'Optimizer', icon: FlaskConical },
   { path: '/dashboard/performance', label: 'Performance', icon: TrendingUp },
   { path: '/dashboard/settings', label: 'Settings', icon: Settings },

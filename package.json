@@ -20,7 +20,9 @@
     "backtest:uk49s": "curl -s -X POST http://localhost:3000/api/backtest/run -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${ADMIN_API_KEY:-}\" -d '{\"drawType\": \"lunchtime\", \"lookbackWindow\": 90, \"testStartDate\": \"2024-01-01\", \"testEndDate\": \"2024-12-31\"}'",
     "optimize:uk49s": "curl -s -X POST http://localhost:3000/api/optimizer/run -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${ADMIN_API_KEY:-}\" -d '{\"drawType\": \"lunchtime\", \"validationStartDate\": \"2023-01-01\", \"validationEndDate\": \"2023-12-31\", \"populationSize\": 30, \"eliteSize\": 3, \"minValidationSamples\": 100}'",
     "predict:uk49s": "curl -s -X POST http://localhost:3000/api/predictions/generate -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${ADMIN_API_KEY:-}\" -d '{\"drawType\": \"lunchtime\"}'",
-    "update:uk49s": "curl -s -X POST http://localhost:3000/api/data/ingest -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${ADMIN_API_KEY:-}\" -d '{\"drawType\": \"latest\"}'"
+    "update:uk49s": "curl -s -X POST http://localhost:3000/api/data/ingest -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${ADMIN_API_KEY:-}\" -d '{\"drawType\": \"latest\"}'",
+    "experiment:uk49s": "curl -s -X POST http://localhost:3000/api/experiments/run -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${ADMIN_API_KEY:-}\" -d '{\"drawType\": \"lunchtime\", \"kind\": \"ablation\", \"lookbackWindow\": 90, \"randomSeed\": 42}'",
+    "experiment:booster": "curl -s -X POST http://localhost:3000/api/experiments/booster -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${ADMIN_API_KEY:-}\" -d '{\"drawType\": \"lunchtime\", \"lookbackWindow\": 90, \"randomSeed\": 42}'"
   },
   "private": true,
   "dependencies": {

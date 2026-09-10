@@ -134,6 +134,45 @@ pnpm run test
 Includes an explicit **leakage test**: a future draw is mutated after predictions are
 made and the earlier predictions are verified to be unchanged.
 
+## Experiment Lab (v2)
+
+The Lab (`/dashboard/lab`, API under `/api/experiments`) is the research layer:
+
+- **Feature ablation** — SuperHybrid with each of the 13 features removed one at a
+  time, plus Frequency-only, Recency-only, Pattern-only, Random, and an Ensemble
+  (Frequency + Recency + Pattern + SuperHybrid rank-averaged). 19 variants per run.
+- **Multi-period walk-forward** — variants are evaluated per calendar year
+  (e.g. 2016–2025), strictly out-of-sample, with paired random/frequency baselines.
+- **Stability analysis** — per-variant volatility (std-dev of yearly avg hits) and a
+  Welch t-test vs the paired random baseline. A variant only counts as "beating
+  random" with p < 0.05.
+- **Separate booster model** — booster-frequency / booster-recency / booster-random
+  are evaluated as an independent prediction problem.
+
+### Real research findings (2026-09-02, lookback 90, seed 42)
+
+**Lunchtime ablation** — 19 variants × 10 years (2016–2025), ~3,600 predictions per
+variant: best variant (SuperHybrid − Repeat) 0.4983 avg hits vs random 0.4719.
+**No variant beat random at p < 0.05** (best p = 0.11).
+
+**Teatime ablation** — 19 variants × 9 years (2017–2025): best variant
+(Pattern-only) 0.4947 vs random 0.4925. **No variant beat random at p < 0.05**.
+
+**Booster model** — 3,192 predictions each, per draw type: booster-frequency hit
+2.29% (Lunch) / 2.04% (Tea) vs 2.04% random expectation — **within noise**.
+
+Conclusion: the current feature set carries no statistically detectable edge. The
+value of the platform is that this is now *provable* out-of-sample, and any future
+feature can be tested the same way before it is trusted.
+
+### Experiment API
+
+- `POST /api/experiments/run` (admin) — `{ drawType, kind, lookbackWindow, randomSeed, periods? }`
+- `POST /api/experiments/booster` (admin) — `{ drawType, lookbackWindow, randomSeed, periods? }`
+- `GET /api/experiments/runs` — list runs
+- `GET /api/experiments/runs/:id` — full detail (variants, per-period rows, booster results)
+- `GET /api/experiments/latest/:drawType` — latest run leaderboard
+
 ## Security
 
 - `DATABASE_URL` and `ADMIN_API_KEY` are server-side environment variables only

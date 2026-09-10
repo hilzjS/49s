@@ -137,9 +137,9 @@ function PredictionCard({ title, prediction, model }: { title: string; predictio
       ) : (
         <div className="prediction-empty">
           <p>No prediction available</p>
-          <button className="btn btn-primary">
+          <a className="btn btn-primary" href="/dashboard/predictions">
             Generate Prediction
-          </button>
+          </a>
         </div>
       )}
       

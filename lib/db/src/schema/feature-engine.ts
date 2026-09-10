@@ -45,6 +45,31 @@ export const DEFAULT_WEIGHTS: FeatureWeights = {
   weightFirst3Minus2: 1.5,
 };
 
+// Canonical feature names (used for ablation and per-feature analysis)
+export type FeatureName = keyof FeatureWeights;
+export const FEATURE_NAMES: FeatureName[] = [
+  "weightFrequency",
+  "weightRecency",
+  "weightHotCold",
+  "weightGapAnalysis",
+  "weightPairs",
+  "weightTriples",
+  "weightConsecutive",
+  "weightOddEven",
+  "weightLowHigh",
+  "weightSumRange",
+  "weightPositional",
+  "weightRepeat",
+  "weightFirst3Minus2",
+];
+
+// Zero out a set of features (for ablation variants)
+export function ablateWeights(base: FeatureWeights, disabled: FeatureName[]): FeatureWeights {
+  const w = { ...base };
+  for (const f of disabled) w[f] = 0;
+  return w;
+}
+
 // Feature result structure
 export interface NumberFeatureScores {
   number: number;

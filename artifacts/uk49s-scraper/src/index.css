@@ -386,6 +386,9 @@
   --coral: #c44651;
   --teal: #397f88;
   --side: #292d43;
+  /* Dashboard aliases */
+  --surface: #fbfaf6;
+  --amber: #f8c84d;
 }
 
 * { box-sizing: border-box; }
@@ -1076,6 +1079,27 @@ tbody tr:hover { background: #f8f5ec; }
 .dist-count { font-size: 16px; font-weight: 700; }
 .url-cell { font-size: 11px; font-family: monospace; word-break: break-all; }
 
+/* Experiment Lab */
+.lab-run-meta { font-size: 12px; color: var(--ink); opacity: 0.6; margin: 0 0 16px; }
+.lab-table { cursor: default; }
+.lab-row { cursor: pointer; }
+.lab-row:hover { background: var(--elevate-1); }
+.lab-row-best { background: rgba(105, 219, 124, 0.08); }
+.trophy { color: var(--amber); }
+.variant-name { font-weight: 600; }
+.lab-table .num { font-variant-numeric: tabular-nums; text-align: right; }
+.sig-badge { padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 12px; white-space: nowrap; }
+.sig-better { background: #d4edda; color: #155724; }
+.sig-worse { background: #f8d7da; color: #721c24; }
+.sig-noise { background: #f8f9fa; color: #6c757d; }
+.sig-na { background: #f8f9fa; color: #adb5bd; }
+.lab-detail-row > td { padding: 0 !important; }
+.period-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; padding: 12px 16px; background: var(--elevate-1); }
+.period-cell { display: flex; flex-direction: column; align-items: center; padding: 8px; background: var(--surface); border-radius: 8px; }
+.period-year { font-size: 10px; font-weight: 700; opacity: 0.5; }
+.period-value { font-size: 15px; font-weight: 700; }
+.period-sub { font-size: 9px; opacity: 0.4; }
+
 .balls-container {
   display: flex;
   gap: 8px;
@@ -1701,3 +1725,21 @@ tbody tr:hover { background: #f8f5ec; }
     grid-template-columns: 1fr;
   }
 }
+
+/* Landing page dashboard CTA */
+.dashboard-cta { margin-top: 16px; display: inline-flex; }
+.intro-aside { display: flex; flex-direction: column; align-items: flex-end; gap: 12px; }
+.sidebar-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; color: inherit; cursor: pointer; }
+
+/* Console button group + ingest */
+.console-button-group { display: flex; gap: 10px; }
+.run-button-ingest { background: var(--paper-bright); color: var(--ink); border: 1px solid var(--ink); }
+.run-button-ingest:hover { opacity: 0.9; }
+.ingest-success {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 18px; margin-bottom: 20px;
+  background: #d4edda; color: #155724;
+  border: 1px solid #c3e6cb; border-radius: 12px;
+  font-size: 13px; font-weight: 500;
+}
+.ingest-success button { margin-left: auto; background: none; border: none; cursor: pointer; color: inherit; }
