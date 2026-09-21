@@ -1,7 +1,25 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 
-const rawPort = process.env["PORT"];
+function resolvePortFromArgv(): string | undefined {
+  const args = process.argv.slice(2);
+
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+
+    if (arg === "--port" || arg === "-p") {
+      return args[i + 1];
+    }
+
+    if (arg.startsWith("--port=")) {
+      return arg.slice("--port=".length);
+    }
+  }
+
+  return undefined;
+}
+
+const rawPort = process.env["PORT"] ?? resolvePortFromArgv();
 
 if (!rawPort) {
   throw new Error(
