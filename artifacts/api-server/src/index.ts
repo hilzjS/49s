@@ -1,4 +1,5 @@
 import app from "./app";
+import { pool } from "@workspace/db";
 import { logger } from "./lib/logger";
 
 function resolvePortFromArgv(): string | undefined {
@@ -48,6 +49,24 @@ if (presentDbEnvVars.length === 0) {
   logger.info({ found: presentDbEnvVars }, "Database connection string detected");
 }
 
+/**
+ * Verifies the database connection once at boot so a bad connection string
+ * surfaces as a clear log line instead of a confusing failure on the first
+ * request. Only the error code/message is logged — never the credentials.
+ */
+async function verifyDatabaseConnection(): Promise<void> {
+  try {
+    await pool.query("SELECT 1");
+    logger.info("Database connection verified");
+  } catch (error) {
+    const err = error as { code?: string; message?: string };
+    logger.error(
+      { code: err.code, message: err.message },
+      "Database connection failed",
+    );
+  }
+}
+
 app.listen(port, (err) => {
   if (err) {
     logger.error({ err }, "Error listening on port");
@@ -55,4 +74,5 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+  void verifyDatabaseConnection();
 });
