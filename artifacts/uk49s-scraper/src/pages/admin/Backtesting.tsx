@@ -184,6 +184,13 @@ export default function AdminBacktesting() {
         </div>
       </Card>
 
+      {latest.data?.statsSince ? (
+        <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-2)] px-4 py-3 text-[12px] text-[var(--text-2)]">
+          Statistics count only backtests run since the current model was applied ({formatDate(latest.data.statsSince)}).
+          Earlier backtests are kept but no longer counted — run a backtest to measure the new model.
+        </div>
+      ) : null}
+
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Avg main hits" value={bt ? bt.superhybrid.avgMainHits.toFixed(2) : '—'} hint={bt ? `${bt.totalPredictions} draws` : ''} tone="mint" />
         <StatCard label="4-hit rate" value={bt ? percent(bt.superhybrid.fourHitRate) : '—'} hint={bt ? `${bt.superhybrid.fourHitCount} exact` : ''} tone="gold" />
@@ -196,10 +203,13 @@ export default function AdminBacktesting() {
           <PanelHeader title="Hit distribution" subtitle="Resolved predictions" right={<GitCompareArrows size={16} className="text-[var(--text-3)]" />} />
           {latest.loading ? (
             <Spinner />
-          ) : latest.error ? (
+          ) : latest.error && latest.status !== 404 ? (
             <ErrorState message={latest.error} onRetry={latest.reload} />
           ) : !bt ? (
-            <EmptyState title="No backtest yet" description="Run a backtest to see the hit distribution." />
+            <EmptyState
+              title="No backtest for the current model"
+              description="Statistics reset when the current model was applied. Run a backtest to measure it."
+            />
           ) : (
             <div className="space-y-3 p-5">
               {distribution.map((entry) => (
@@ -236,7 +246,7 @@ export default function AdminBacktesting() {
           {history.loading ? (
             <Spinner />
           ) : !history.data?.backtests?.length ? (
-            <EmptyState title="No backtests recorded" description="Completed runs appear here." />
+            <EmptyState title="No backtests for the current model" description="Completed runs appear here." />
           ) : (
             <div className="overflow-x-auto">
               <table className="table">

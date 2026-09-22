@@ -18,9 +18,10 @@ import {
   type LookbackComparison,
 } from "@workspace/db/schema";
 import { DEFAULT_WEIGHTS, type FeatureWeights } from "@workspace/db/schema";
-import { eq, desc } from "drizzle-orm";
+import { eq, and, desc, gte } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import { requireAdmin } from "../lib/admin-auth";
+import { getStatsCutoff } from "../lib/stats-scope";
 
 const router: IRouter = Router();
 
@@ -194,19 +195,27 @@ router.get("/history/:drawType", async (req, res) => {
   }
   
   const limit = Math.min(parseInt(String(req.query.limit || "20")), 100);
-  
-  try {
-    const runs = await db
-      .select()
-      .from(uk49sBacktestRuns)
-      .where(eq(uk49sBacktestRuns.drawType, drawType))
-      .orderBy(desc(uk49sBacktestRuns.completedAt))
-      .limit(limit);
     
-    res.json({
-      success: true,
-      count: runs.length,
-      backtests: runs.map(r => ({
+    try {
+      // Backtests recorded before the current model was applied belong to a
+      // previous model and are excluded from the statistics.
+      const statsSince = await getStatsCutoff(drawType);
+      const runs = await db
+        .select()
+        .from(uk49sBacktestRuns)
+        .where(
+          statsSince
+            ? and(eq(uk49sBacktestRuns.drawType, drawType), gte(uk49sBacktestRuns.completedAt, statsSince))
+            : eq(uk49sBacktestRuns.drawType, drawType)
+        )
+        .orderBy(desc(uk49sBacktestRuns.completedAt))
+        .limit(limit);
+      
+      res.json({
+        success: true,
+        count: runs.length,
+        statsSince: statsSince ? statsSince.toISOString() : null,
+        backtests: runs.map(r => ({
         id: r.id,
         lookbackWindow: r.lookbackWindow,
         testPeriod: { startDate: r.testStartDate, endDate: r.testEndDate },
@@ -241,16 +250,22 @@ router.get("/latest/:drawType", async (req, res) => {
   }
   
   try {
-    const [run] = await db
-      .select()
-      .from(uk49sBacktestRuns)
-      .where(eq(uk49sBacktestRuns.drawType, drawType))
-      .orderBy(desc(uk49sBacktestRuns.completedAt))
-      .limit(1);
-    
-    if (!run) {
-      res.status(404).json({ error: "No backtest runs found" }); return;
-    }
+      // A backtest only counts while it belongs to the current model.
+      const statsSince = await getStatsCutoff(drawType);
+      const [run] = await db
+        .select()
+        .from(uk49sBacktestRuns)
+        .where(
+          statsSince
+            ? and(eq(uk49sBacktestRuns.drawType, drawType), gte(uk49sBacktestRuns.completedAt, statsSince))
+            : eq(uk49sBacktestRuns.drawType, drawType)
+        )
+        .orderBy(desc(uk49sBacktestRuns.completedAt))
+        .limit(1);
+      
+      if (!run) {
+        res.status(404).json({ error: "No backtest has been run for the current model yet" }); return;
+      }
     
     const hitDistribution = [
       { hits: 0, count: run.hit0Count },
@@ -285,10 +300,11 @@ router.get("/latest/:drawType", async (req, res) => {
       predictions: [],
     };
     // Return the same shape as POST /run so the frontend can treat them uniformly
-    res.json({
-      success: true,
-      backtest: {
-        id: run.id,
+        res.json({
+          success: true,
+          statsSince: statsSince ? statsSince.toISOString() : null,
+          backtest: {
+            id: run.id,
         totalPredictions: run.totalPredictions,
         testPeriod: { startDate: run.testStartDate, endDate: run.testEndDate },
         lookbackWindow: run.lookbackWindow,

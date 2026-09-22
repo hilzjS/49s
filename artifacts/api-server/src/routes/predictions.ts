@@ -14,6 +14,7 @@ import {
 } from "../lib/prediction-service";
 import { logger } from "../lib/logger";
 import { requireAdmin } from "../lib/admin-auth";
+import { getStatsCutoff } from "../lib/stats-scope";
 
 const router: IRouter = Router();
 
@@ -176,12 +177,16 @@ router.get("/history/:drawType", async (req: Request, res: Response) => {
   const offset = parseInt(String(req.query.offset ?? "0"), 10) || 0;
 
   try {
-    const predictions = await getPredictionHistory(drawType, limit, offset);
-
-    res.json({
-      success: true,
-      count: predictions.length,
-      predictions: predictions.map((p) => ({
+      // Only count predictions made by the current model, so results from a
+      // previous model do not mix into the statistics.
+      const statsSince = await getStatsCutoff(drawType);
+      const predictions = await getPredictionHistory(drawType, limit, offset, statsSince);
+  
+      res.json({
+        success: true,
+        count: predictions.length,
+        statsSince: statsSince ? statsSince.toISOString() : null,
+        predictions: predictions.map((p) => ({
         ...p,
         warning: "These are statistical pattern predictions based on historical data. Lottery outcomes are random and cannot be guaranteed.",
       })),

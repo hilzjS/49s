@@ -24,7 +24,7 @@ import {
   type DiversityConstraints,
   type PredictionResult,
 } from "@workspace/db/schema";
-import { eq, and, desc, asc } from "drizzle-orm";
+import { eq, and, desc, asc, gte } from "drizzle-orm";
 import { logger } from "./logger";
 
 export interface ModelInfo {
@@ -383,12 +383,19 @@ export async function getLatestPrediction(drawType: DrawType): Promise<Predictio
 export async function getPredictionHistory(
   drawType: DrawType,
   limit = 50,
-  offset = 0
+  offset = 0,
+  since: Date | null = null
 ): Promise<PredictionInfo[]> {
+  // `since` scopes the history to the current active model so statistics from a
+  // previous model are no longer counted (see lib/stats-scope.ts).
   const predictions = await db
     .select()
     .from(uk49sPredictions)
-    .where(eq(uk49sPredictions.drawType, drawType))
+    .where(
+      since
+        ? and(eq(uk49sPredictions.drawType, drawType), gte(uk49sPredictions.createdAt, since))
+        : eq(uk49sPredictions.drawType, drawType)
+    )
     .orderBy(desc(uk49sPredictions.predictionDate))
     .limit(limit)
     .offset(offset);

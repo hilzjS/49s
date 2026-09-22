@@ -139,6 +139,8 @@ export interface ModelInfo {
 
 export interface BacktestRun {
   id: number;
+  /** Statistics are only counted since the active model was applied. */
+  statsSince?: string | null;
   totalPredictions: number;
   testPeriod: { startDate: string; endDate: string };
   lookbackWindow: number;
@@ -365,9 +367,9 @@ export const api = {
   getLatestPrediction: (drawType: DrawType) =>
     get<{ success: boolean; prediction: Prediction }>(`/api/predictions/latest/${drawType}`),
   getPredictionHistory: (drawType: DrawType, limit = 50) =>
-    get<{ success: boolean; count: number; predictions: Prediction[] }>(
-      `/api/predictions/history/${drawType}?limit=${limit}`,
-    ),
+      get<{ success: boolean; count: number; statsSince?: string | null; predictions: Prediction[] }>(
+        `/api/predictions/history/${drawType}?limit=${limit}`,
+      ),
   getActiveModel: (drawType: DrawType) =>
     get<{ success: boolean; model: ModelInfo }>(`/api/predictions/model/${drawType}`),
   getModelHistory: (drawType: DrawType) =>
@@ -376,11 +378,13 @@ export const api = {
     ),
 
   getBacktestLatest: (drawType: DrawType) =>
-    get<{ success: boolean; backtest: BacktestRun }>(`/api/backtest/latest/${drawType}`),
-  getBacktestHistory: (drawType: DrawType) =>
-    get<{ success: boolean; count: number; backtests: BacktestHistoryItem[] }>(
-      `/api/backtest/history/${drawType}`,
-    ),
+      get<{ success: boolean; statsSince?: string | null; backtest: BacktestRun }>(
+        `/api/backtest/latest/${drawType}`,
+      ),
+    getBacktestHistory: (drawType: DrawType) =>
+      get<{ success: boolean; count: number; statsSince?: string | null; backtests: BacktestHistoryItem[] }>(
+        `/api/backtest/history/${drawType}`,
+      ),
   getOptimizerHistory: (drawType: DrawType) =>
     get<{ success: boolean; count: number; optimizationRuns: OptimizerRunItem[] }>(
       `/api/optimizer/history/${drawType}`,

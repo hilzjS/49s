@@ -49,6 +49,13 @@ export default function History() {
         />
       </div>
 
+      {data.data?.statsSince ? (
+        <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-2)] px-4 py-3 text-[12px] text-[var(--text-2)]">
+          Statistics count only predictions from the current model, applied {formatDate(data.data.statsSince)}. Earlier
+          predictions are kept but no longer counted.
+        </div>
+      ) : null}
+
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Predictions" value={predictions.length} hint={`${label} session`} tone="sky" />
         <StatCard label="Avg main hits" value={avgHits != null ? avgHits.toFixed(2) : '—'} hint={`${resolved.length} resolved`} tone="mint" />

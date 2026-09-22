@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { BarChart3, Flame, Snowflake, Sparkles, TrendingUp } from 'lucide-react';
 import { api, type DrawType } from '@/lib/api';
-import { useAsync } from '@/lib/useAsync';
+import { useAsync, formatDate } from '@/lib/useAsync';
 import { BarFrequencyChart, CHART_COLORS, DonutChart, TrendAreaChart } from '@/components/charts';
 import {
   Badge,
@@ -167,6 +167,14 @@ export default function Analytics() {
         </Card>
       ) : (
         <>
+          {backtest.data?.statsSince ?? history.data?.statsSince ? (
+            <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-2)] px-4 py-3 text-[12px] text-[var(--text-2)]">
+              Performance statistics count only predictions and backtests from the current model, applied{' '}
+              {formatDate(backtest.data?.statsSince ?? history.data?.statsSince)}. Earlier figures are kept but no
+              longer counted.
+            </div>
+          ) : null}
+
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <StatCard
               label="Hottest (all-time)"
