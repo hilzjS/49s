@@ -13,6 +13,7 @@ import {
   compareLookbackWindows,
   calculateRollingMetrics,
   type BacktestConfig,
+  type DiversityConstraints,
   type FullBacktestResult,
   type LookbackComparison,
 } from "@workspace/db/schema";
@@ -25,7 +26,7 @@ const router: IRouter = Router();
 
 // Run walk-forward backtest
 router.post("/run", requireAdmin, async (req, res) => {
-  const { drawType, lookbackWindow, testStartDate, testEndDate, weights, randomSeed } = req.body;
+  const { drawType, lookbackWindow, testStartDate, testEndDate, weights, constraints, randomSeed } = req.body;
   
   if (!drawType || (drawType !== "lunchtime" && drawType !== "teatime")) {
     res.status(400).json({ error: "drawType must be 'lunchtime' or 'teatime'" }); return;
@@ -59,8 +60,20 @@ router.post("/run", requireAdmin, async (req, res) => {
     
     const modelWeights: FeatureWeights = weights || DEFAULT_WEIGHTS;
     
+    // The optimized model also carries diversity constraints; without them the
+    // backtest would evaluate a different configuration than the active model.
+    const modelConstraints: DiversityConstraints = {
+      enforceDiversity: constraints?.enforceDiversity ?? true,
+      minNumberSpread: Number.isFinite(Number(constraints?.minNumberSpread))
+        ? Math.floor(Number(constraints?.minNumberSpread))
+        : 10,
+      maxSameGroup: Number.isFinite(Number(constraints?.maxSameGroup))
+        ? Math.floor(Number(constraints?.maxSameGroup))
+        : 2,
+    };
+
     // Run full backtest with baselines
-    const result = runFullBacktest(draws, config, modelWeights);
+    const result = runFullBacktest(draws, config, modelWeights, modelConstraints);
     
     // Store backtest run
     await db.insert(uk49sBacktestRuns).values({

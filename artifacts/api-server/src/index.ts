@@ -94,13 +94,19 @@ app.listen(port, (err) => {
     void verifyDatabaseConnection().then(() => recoverOrphanedOptimizerJobs());
 
   const sweep = setInterval(() => {
-    void recoverInterruptedJobs("Optimizer run stalled — no progress was reported");
+    void recoverInterruptedJobs("Optimizer run stalled — no progress was reported").catch((error: unknown) => {
+      // A failed sweep must never become an unhandled rejection: that would
+      // terminate the API process and take every endpoint down with it.
+      logger.error({ error }, "Optimizer stall sweep failed");
+    });
   }, OPTIMIZER_SWEEP_INTERVAL_MS);
   sweep.unref();
 
   const shutdown = (signal: string): void => {
     logger.info({ signal }, "Shutting down");
-    void shutdownOptimizerJobs().finally(() => process.exit(0));
+    void shutdownOptimizerJobs()
+      .catch((error: unknown) => logger.error({ error }, "Failed to shut down optimizer jobs cleanly"))
+      .finally(() => process.exit(0));
   };
 
   process.once("SIGINT", () => shutdown("SIGINT"));

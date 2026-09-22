@@ -26,15 +26,24 @@ export default function AdminBacktesting() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [useActiveModel, setUseActiveModel] = useState(true);
 
   const latest = useAsync(() => api.getBacktestLatest(drawType), [drawType]);
   const history = useAsync(() => api.getBacktestHistory(drawType), [drawType]);
   const summary = useAsync(() => api.getDataSummary(), []);
+  const modelState = useAsync(() => api.getActiveModel(drawType), [drawType]);
   const bt = latest.data?.backtest;
 
   const label = drawType === 'lunchtime' ? 'Lunchtime' : 'Teatime';
   const latestDrawDate =
     (drawType === 'lunchtime' ? summary.data?.lunchtime.latestDate : summary.data?.teatime.latestDate) ?? null;
+
+  // The backtest only reflects the optimized model when that model's weights and
+  // constraints are sent with the request. Without them the API falls back to
+  // the default weights, which is a different configuration entirely.
+  const activeModel = modelState.data?.model ?? null;
+  const usingActiveModel = useActiveModel && activeModel !== null;
+  const effectiveLookback = usingActiveModel && activeModel ? activeModel.lookbackWindow : lookbackWindow;
 
   // The engine closes the test window with the first draw *after* testEndDate.
   // If no such draw exists it silently returns zero predictions, so the window
@@ -59,8 +68,25 @@ export default function AdminBacktesting() {
     setMessage(null);
     setError(null);
     try {
-      await api.runBacktest({ drawType, lookbackWindow, testStartDate, testEndDate });
-      setMessage('Backtest completed and stored.');
+      const body: Record<string, unknown> = {
+        drawType,
+        lookbackWindow: effectiveLookback,
+        testStartDate,
+        testEndDate,
+      };
+      // Send the active model's weights and constraints so the backtest
+      // evaluates the model that was actually optimized, not the defaults.
+      if (usingActiveModel && activeModel) {
+        body.weights = activeModel.weights;
+        body.constraints = activeModel.constraints;
+      }
+
+      await api.runBacktest(body);
+      setMessage(
+        usingActiveModel && activeModel
+          ? `Backtest completed using the active ${label} model (v${activeModel.version}, lookback ${activeModel.lookbackWindow}).`
+          : 'Backtest completed and stored.',
+      );
       latest.reload();
       history.reload();
     } catch (err) {
@@ -107,13 +133,14 @@ export default function AdminBacktesting() {
           right={<Play size={16} className="text-[var(--text-3)]" />}
         />
         <div className="flex flex-wrap items-end gap-3 p-5">
-          <Field label="Lookback window">
+          <Field label="Lookback window" hint={usingActiveModel ? 'From the active model' : undefined}>
             <Input
               type="number"
               min={10}
               max={500}
-              value={lookbackWindow}
+              value={effectiveLookback}
               onChange={(e) => setLookbackWindow(Number(e.target.value))}
+              disabled={usingActiveModel}
             />
           </Field>
           <Field label="Test start">
@@ -122,12 +149,37 @@ export default function AdminBacktesting() {
           <Field label="Test end">
             <Input type="date" value={testEndDate} onChange={(e) => setTestEndDate(e.target.value)} />
           </Field>
+          <label className="flex items-end gap-2 pb-2.5 text-[12.5px] text-[var(--text-2)]">
+            <input
+              type="checkbox"
+              checked={usingActiveModel}
+              onChange={(e) => setUseActiveModel(e.target.checked)}
+              disabled={!activeModel}
+              className="h-4 w-4 accent-[var(--gold)]"
+            />
+            Use active model
+          </label>
           <Button onClick={run} loading={busy}>
             <Play size={15} /> Run backtest
           </Button>
           <p className="w-full text-[11.5px] text-[var(--text-3)]">
             Latest {label} draw: <span className="mono text-[var(--text-2)]">{latestDrawDate ?? '—'}</span> · the
             window must end before it.
+          </p>
+          <p className="w-full text-[11.5px] text-[var(--text-3)]">
+            {modelState.loading ? (
+              'Loading active model…'
+            ) : activeModel ? (
+              <>
+                Backtesting the active {label} model{' '}
+                <span className="mono text-[var(--text-2)]">v{activeModel.version}</span> · lookback{' '}
+                <span className="mono text-[var(--text-2)]">{activeModel.lookbackWindow}</span> · validation 4-hit{' '}
+                <span className="mono text-[var(--text-2)]">{percent(activeModel.validationMetrics?.fourHitRate ?? null)}</span>{' '}
+                over {activeModel.validationMetrics?.sampleSize ?? '—'} draws. Uncheck to run the default weights.
+              </>
+            ) : (
+              `No active ${label} model yet — the backtest will run with the default weights. Apply an optimizer result to test the optimized model.`
+            )}
           </p>
         </div>
       </Card>

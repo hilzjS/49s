@@ -638,10 +638,13 @@ export async function startOptimizerJob(params: StartOptimizerJobParams): Promis
     // "exit" is not mistaken for a crash while the result is being stored.
     if (message.type === "done" || message.type === "error") {
       if (job.settled) return;
-      job.settled = true;
-    }
-    void handleWorkerMessage(job, message);
-  });
+            job.settled = true;
+          }
+          void handleWorkerMessage(job, message).catch((error: unknown) => {
+            logger.error({ error, runId: job.runId }, "Failed to process optimizer worker message");
+            void markRunFailed(job.runId, "Failed to process the optimizer worker result");
+          });
+        });
 
   worker.on("error", (error: Error) => {
     logger.error({ error, runId: job.runId }, "Optimizer worker error");
@@ -842,10 +845,18 @@ async function rebuildStateFromRow(runId: number): Promise<OptimizerJobPublicSta
  * "running".
  */
 export async function recoverInterruptedJobs(reason: string): Promise<number> {
-  const stale = await db
-    .select({ id: uk49sOptimizerRuns.id })
-    .from(uk49sOptimizerRuns)
-    .where(inArray(uk49sOptimizerRuns.status, ["queued", "running"]));
+  let stale: { id: number }[];
+  try {
+    stale = await db
+      .select({ id: uk49sOptimizerRuns.id })
+      .from(uk49sOptimizerRuns)
+      .where(inArray(uk49sOptimizerRuns.status, ["queued", "running"]));
+  } catch (error) {
+    // Recovery is best-effort. A transient database failure must not propagate:
+    // the periodic sweep calls this every few minutes and will retry.
+    logger.error({ error }, "Failed to list interrupted optimizer runs for recovery");
+    return 0;
+  }
 
   let recovered = 0;
 
