@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { FlaskConical, Play } from 'lucide-react';
 import { api, type DrawType } from '@/lib/api';
-import { useAsync, formatDate, isoDaysAgo } from '@/lib/useAsync';
+import { useAsync, formatDate, isoDaysAgo, shiftIsoDate } from '@/lib/useAsync';
 import {
   Badge,
   Button,
@@ -27,10 +27,33 @@ export default function AdminOptimizer() {
   const [error, setError] = useState<string | null>(null);
 
   const history = useAsync(() => api.getOptimizerHistory(drawType), [drawType]);
+  const summary = useAsync(() => api.getDataSummary(), []);
   const runs = history.data?.optimizationRuns ?? [];
   const best = runs.find((run) => run.bestMetrics.fourHitRate != null);
 
+  const label = drawType === 'lunchtime' ? 'Lunchtime' : 'Teatime';
+  const latestDrawDate =
+    (drawType === 'lunchtime' ? summary.data?.lunchtime.latestDate : summary.data?.teatime.latestDate) ?? null;
+
+  // Validation is scored by the backtest engine, which closes its window with
+  // the first draw after the end date — so the window must stop short of the
+  // latest draw.
+  useEffect(() => {
+    if (!latestDrawDate) return;
+    const end = shiftIsoDate(latestDrawDate, -1);
+    setValidationEndDate(end);
+    setValidationStartDate(shiftIsoDate(end, -180));
+  }, [latestDrawDate]);
+
   async function run() {
+    if (latestDrawDate && validationEndDate >= latestDrawDate) {
+      setMessage(null);
+      setError(
+        `Validation end must be before the latest ${label} draw (${latestDrawDate}) — the engine needs a later draw to close the window.`,
+      );
+      return;
+    }
+
     setBusy(true);
     setMessage(null);
     setError(null);
@@ -132,6 +155,10 @@ export default function AdminOptimizer() {
           <Button onClick={run} loading={busy}>
             <Play size={15} /> Run optimizer
           </Button>
+          <p className="w-full text-[11.5px] text-[var(--text-3)]">
+            Latest {label} draw: <span className="mono text-[var(--text-2)]">{latestDrawDate ?? '—'}</span> · the
+            validation window must end before it.
+          </p>
         </div>
       </Card>
 

@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { GitCompareArrows, Play } from 'lucide-react';
 import { api, type DrawType } from '@/lib/api';
-import { useAsync, formatDate, isoDaysAgo } from '@/lib/useAsync';
+import { useAsync, formatDate, isoDaysAgo, shiftIsoDate } from '@/lib/useAsync';
 import {
   Badge,
   Button,
@@ -29,9 +29,32 @@ export default function AdminBacktesting() {
 
   const latest = useAsync(() => api.getBacktestLatest(drawType), [drawType]);
   const history = useAsync(() => api.getBacktestHistory(drawType), [drawType]);
+  const summary = useAsync(() => api.getDataSummary(), []);
   const bt = latest.data?.backtest;
 
+  const label = drawType === 'lunchtime' ? 'Lunchtime' : 'Teatime';
+  const latestDrawDate =
+    (drawType === 'lunchtime' ? summary.data?.lunchtime.latestDate : summary.data?.teatime.latestDate) ?? null;
+
+  // The engine closes the test window with the first draw *after* testEndDate.
+  // If no such draw exists it silently returns zero predictions, so the window
+  // has to stop short of the latest draw.
+  useEffect(() => {
+    if (!latestDrawDate) return;
+    const end = shiftIsoDate(latestDrawDate, -1);
+    setTestEndDate(end);
+    setTestStartDate(shiftIsoDate(end, -180));
+  }, [latestDrawDate]);
+
   async function run() {
+    if (latestDrawDate && testEndDate >= latestDrawDate) {
+      setMessage(null);
+      setError(
+        `Test end must be before the latest ${label} draw (${latestDrawDate}) — the engine needs a later draw to close the window, otherwise it returns zero predictions.`,
+      );
+      return;
+    }
+
     setBusy(true);
     setMessage(null);
     setError(null);
@@ -102,6 +125,10 @@ export default function AdminBacktesting() {
           <Button onClick={run} loading={busy}>
             <Play size={15} /> Run backtest
           </Button>
+          <p className="w-full text-[11.5px] text-[var(--text-3)]">
+            Latest {label} draw: <span className="mono text-[var(--text-2)]">{latestDrawDate ?? '—'}</span> · the
+            window must end before it.
+          </p>
         </div>
       </Card>
 

@@ -78,6 +78,12 @@ export function isoDaysAgo(days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+export function shiftIsoDate(iso: string, days: number): string {
+  const date = new Date(`${iso}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 export function greeting(): string {
   const hour = new Date().getHours();
   if (hour < 12) return 'Good morning';
