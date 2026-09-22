@@ -19,10 +19,15 @@ import {
 import {
   generatePrediction,
   predictionToJson,
+  generateHybridPrediction,
+  hybridPredictionToJson,
+  isPredictionStrategy,
   DEFAULT_WEIGHTS,
+  DEFAULT_HYBRID_POOL_SIZE,
   type FeatureWeights,
   type DiversityConstraints,
   type PredictionResult,
+  type PredictionStrategy,
 } from "@workspace/db/schema";
 import { eq, and, desc, asc, gte } from "drizzle-orm";
 import { logger } from "./logger";
@@ -32,6 +37,8 @@ export interface ModelInfo {
   drawType: DrawType;
   version: string;
   status: string;
+  strategy: PredictionStrategy;
+  poolSize: number;
   weights: FeatureWeights;
   lookbackWindow: number;
   constraints: DiversityConstraints;
@@ -81,6 +88,8 @@ export async function getOrCreateDefaultModel(drawType: DrawType): Promise<numbe
     drawType,
     version,
     status: "active",
+    strategy: "superhybrid",
+    poolSize: DEFAULT_HYBRID_POOL_SIZE,
     weightFrequency: DEFAULT_WEIGHTS.weightFrequency,
     weightRecency: DEFAULT_WEIGHTS.weightRecency,
     weightHotCold: DEFAULT_WEIGHTS.weightHotCold,
@@ -123,6 +132,8 @@ export async function getActiveModel(drawType: DrawType): Promise<ModelInfo | nu
     drawType: m.drawType,
     version: m.version,
     status: m.status,
+    strategy: isPredictionStrategy(m.strategy) ? m.strategy : "superhybrid",
+    poolSize: m.poolSize,
     weights: {
       weightFrequency: m.weightFrequency,
       weightRecency: m.weightRecency,
@@ -137,6 +148,7 @@ export async function getActiveModel(drawType: DrawType): Promise<ModelInfo | nu
       weightPositional: m.weightPositional,
       weightRepeat: m.weightRepeat,
       weightFirst3Minus2: m.weightFirst3Minus2,
+      weightBonusInfluence: m.weightBonusInfluence,
     },
     lookbackWindow: m.lookbackWindow,
     constraints: {
@@ -196,7 +208,9 @@ export async function generateAndStorePrediction(
       weightPositional: m.weightPositional,
       weightRepeat: m.weightRepeat,
       weightFirst3Minus2: m.weightFirst3Minus2,
+      weightBonusInfluence: m.weightBonusInfluence,
     };
+    const strategy: PredictionStrategy = isPredictionStrategy(m.strategy) ? m.strategy : "superhybrid";
     const constraints: DiversityConstraints = {
       enforceDiversity: m.enforceDiversity,
       minNumberSpread: m.minNumberSpread,
@@ -218,32 +232,52 @@ export async function generateAndStorePrediction(
       return { success: false, error: `Not enough historical data before ${predictionDate}. Need ${m.lookbackWindow}, have ${draws.length}` };
     }
     
-    // Generate prediction using data up to prediction date
-    // For future predictions, use all available data
-    const prediction = generatePrediction(
-      draws,
-      drawType,
-      weights,
-      m.lookbackWindow,
-      constraints,
-      modelId
-    );
+    // Generate prediction with the active model's strategy, using ONLY draws
+    // strictly before the prediction date.
+    let mainNumbers: number[];
+    let boosterBall: number;
+    let trainingCutoff: string;
+    let componentScoresJson: string;
+    let overallScore: number;
+
+    if (strategy === "hybrid") {
+      const hybrid = generateHybridPrediction(draws, weights, m.lookbackWindow, m.poolSize);
+      mainNumbers = hybrid.mainNumbers;
+      boosterBall = hybrid.boosterBall;
+      trainingCutoff = hybrid.trainingCutoff;
+      componentScoresJson = JSON.stringify(hybridPredictionToJson(hybrid));
+      const selected = hybrid.componentScores.filter((s) => mainNumbers.includes(s.number));
+      overallScore = selected.length > 0 ? selected.reduce((sum, s) => sum + s.overallScore, 0) / selected.length : 0;
+    } else {
+      const prediction: PredictionResult = generatePrediction(
+        draws,
+        drawType,
+        weights,
+        m.lookbackWindow,
+        constraints,
+        modelId
+      );
+      mainNumbers = prediction.mainNumbers;
+      boosterBall = prediction.boosterBall;
+      trainingCutoff = prediction.trainingCutoff;
+      componentScoresJson = JSON.stringify(predictionToJson(prediction));
+      const selected = prediction.componentScores.filter((s) => mainNumbers.includes(s.number));
+      overallScore = selected.length > 0 ? selected.reduce((sum, s) => sum + s.overallScore, 0) / selected.length : 0;
+    }
     
     // Store prediction
     const [storedPrediction] = await db.insert(uk49sPredictions).values({
       drawType,
       predictionDate,
-      predictedMain1: prediction.mainNumbers[0],
-      predictedMain2: prediction.mainNumbers[1],
-      predictedMain3: prediction.mainNumbers[2],
-      predictedMain4: prediction.mainNumbers[3],
-      predictedBooster: prediction.boosterBall,
+      predictedMain1: mainNumbers[0],
+      predictedMain2: mainNumbers[1],
+      predictedMain3: mainNumbers[2],
+      predictedMain4: mainNumbers[3],
+      predictedBooster: boosterBall,
       modelConfigId: modelId,
-      trainingCutoff: prediction.trainingCutoff,
-      componentScores: JSON.stringify(predictionToJson(prediction)),
-      overallScore: prediction.componentScores
-        .filter(s => prediction.mainNumbers.includes(s.number))
-        .reduce((sum, s) => sum + s.overallScore, 0) / 4,
+      trainingCutoff,
+      componentScores: componentScoresJson,
+      overallScore,
       status: "pending",
     }).returning();
     
@@ -412,8 +446,12 @@ export async function updateActiveModel(
   constraints: DiversityConstraints,
   validation4HitRate: number,
   validationAvgHits: number,
-  validationSampleSize: number
+  validationSampleSize: number,
+  options: { strategy?: PredictionStrategy; poolSize?: number } = {}
 ): Promise<number> {
+  const strategy: PredictionStrategy = options.strategy ?? "superhybrid";
+  const poolSize = options.poolSize ?? DEFAULT_HYBRID_POOL_SIZE;
+
   // Archive current active model
   await db.update(uk49sModelConfigs)
     .set({ status: "archived", updatedAt: new Date() })
@@ -428,6 +466,8 @@ export async function updateActiveModel(
     drawType,
     version,
     status: "active",
+    strategy,
+    poolSize,
     weightFrequency: weights.weightFrequency,
     weightRecency: weights.weightRecency,
     weightHotCold: weights.weightHotCold,
@@ -441,6 +481,7 @@ export async function updateActiveModel(
     weightPositional: weights.weightPositional,
     weightRepeat: weights.weightRepeat,
     weightFirst3Minus2: weights.weightFirst3Minus2,
+    weightBonusInfluence: weights.weightBonusInfluence,
     lookbackWindow,
     enforceDiversity: constraints.enforceDiversity,
     minNumberSpread: constraints.minNumberSpread,
@@ -448,7 +489,7 @@ export async function updateActiveModel(
     validation4HitRate,
     validationAvgHits,
     validationSampleSize,
-    description: `Optimized SuperHybrid model`,
+    description: strategy === "hybrid" ? `Optimized Super Hybrid (freq/gap/bonus) model` : `Optimized SuperHybrid model`,
   }).returning();
   
   return newModel.id;
@@ -467,6 +508,8 @@ export async function getModelHistory(drawType: DrawType): Promise<ModelInfo[]> 
     drawType: m.drawType,
     version: m.version,
     status: m.status,
+    strategy: isPredictionStrategy(m.strategy) ? m.strategy : "superhybrid",
+    poolSize: m.poolSize,
     weights: {
       weightFrequency: m.weightFrequency,
       weightRecency: m.weightRecency,
@@ -481,6 +524,7 @@ export async function getModelHistory(drawType: DrawType): Promise<ModelInfo[]> 
       weightPositional: m.weightPositional,
       weightRepeat: m.weightRepeat,
       weightFirst3Minus2: m.weightFirst3Minus2,
+      weightBonusInfluence: m.weightBonusInfluence,
     },
     lookbackWindow: m.lookbackWindow,
     constraints: {

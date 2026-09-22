@@ -8,6 +8,7 @@ import type {
   OptimizerConfig,
   OptimizerResult,
   OptimizerSearchOptions,
+  PredictionStrategy,
   Uk49sDraw,
 } from "@workspace/db/schema";
 
@@ -27,10 +28,12 @@ export interface OptimizerWorkerProgressMessage {
    */
   iteration: number;
   phase: "random-search" | "hill-climbing";
+  strategy: PredictionStrategy;
   best4HitRate: number | null;
   bestAvgHits: number | null;
   bestScore: number | null;
   currentLookbackWindow: number;
+  currentPoolSize: number;
   currentWeights: FeatureWeights;
   currentConstraints: DiversityConstraints;
   /** Best single-prediction hit count seen so far. */

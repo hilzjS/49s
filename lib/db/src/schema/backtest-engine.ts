@@ -16,6 +16,11 @@ import {
   type DiversityConstraints,
   type NumberFeatureScores,
 } from "./feature-engine";
+import {
+  DEFAULT_HYBRID_POOL_SIZE,
+  generateHybridPrediction,
+  type PredictionStrategy,
+} from "./hybrid-strategy";
 
 export interface BacktestConfig {
   drawType: DrawType;
@@ -24,6 +29,10 @@ export interface BacktestConfig {
   testStartDate: string;
   testEndDate: string;
   randomSeed?: number;
+  /** Selectable strategy: "superhybrid" (default) or "hybrid". */
+  strategy?: PredictionStrategy;
+  /** Hybrid pool size — ignored by the superhybrid strategy. */
+  poolSize?: number;
 }
 
 export interface BacktestPrediction {
@@ -97,6 +106,32 @@ function seededRandom(seed: number): () => number {
   };
 }
 
+/**
+ * Produces one prediction from a training set using the configured strategy.
+ * Shared by the walk-forward backtest so both strategies are evaluated through
+ * exactly the same leakage-free path.
+ */
+export function generateStrategyPrediction(
+  trainingSet: Uk49sDraw[],
+  weights: FeatureWeights,
+  constraints: DiversityConstraints,
+  config: Pick<BacktestConfig, "strategy" | "lookbackWindow" | "poolSize">,
+): { main: number[]; booster: number } {
+  if ((config.strategy ?? "superhybrid") === "hybrid") {
+    const prediction = generateHybridPrediction(
+      trainingSet,
+      weights,
+      config.lookbackWindow,
+      config.poolSize ?? DEFAULT_HYBRID_POOL_SIZE,
+    );
+    return { main: prediction.mainNumbers, booster: prediction.boosterBall };
+  }
+
+  const scores = calculateAllFeatureScores(trainingSet, weights, config.lookbackWindow);
+  const main = selectBestNumbers(scores, constraints);
+  return { main, booster: selectBoosterBall(scores, main) };
+}
+
 // Run single backtest with a specific model
 export function runBacktest(
   draws: Uk49sDraw[],
@@ -144,10 +179,14 @@ export function runBacktest(
     const trainingSet = trainingDraws.slice(-config.lookbackWindow);
     const trainingCutoff = trainingSet[trainingSet.length - 1].drawDate;
     
-    // Calculate features and generate prediction
-    const scores = calculateAllFeatureScores(trainingSet, weights, config.lookbackWindow);
-    const predictedMain = selectBestNumbers(scores, constraints);
-    const predictedBooster = selectBoosterBall(scores, predictedMain);
+    // Generate prediction with the selected strategy. Both branches use ONLY
+    // the training set (draws strictly before the target draw).
+    const { main: predictedMain, booster: predictedBooster } = generateStrategyPrediction(
+      trainingSet,
+      weights,
+      constraints,
+      config,
+    );
     
     // Get actual result
     const actual = drawToNumbers(targetDraw);

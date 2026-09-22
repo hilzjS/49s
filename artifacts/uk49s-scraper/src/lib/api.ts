@@ -179,6 +179,22 @@ export interface BacktestHistoryItem {
 
 export type OptimizerStopReason = 'four-hit-found' | 'max-configurations-reached' | 'search-exhausted';
 
+/** Selectable prediction strategies the optimizer can search. */
+export type PredictionStrategy = 'superhybrid' | 'hybrid';
+
+export const PREDICTION_STRATEGY_OPTIONS: { value: PredictionStrategy; label: string; hint: string }[] = [
+  {
+    value: 'superhybrid',
+    label: 'SuperHybrid (13 features)',
+    hint: 'Frequency, recency, hot/cold, gap, pairs, triples, balance and more',
+  },
+  {
+    value: 'hybrid',
+    label: 'Super Hybrid (Frequency · Gap · Bonus)',
+    hint: 'Frequency 0.5 + gap 0.3 + booster-influence 0.2 → top-pool → best 4',
+  },
+];
+
 /** A historical validation prediction that matched exactly four numbers. */
 export interface FourHitRecord {
   validationDrawDate: string;
@@ -193,6 +209,7 @@ export interface FourHitRecord {
 export interface OptimizerRunItem {
   id: number;
   drawType?: DrawType;
+  strategy?: PredictionStrategy;
   status: string;
   configsTested: number;
   configsFailed?: number;
@@ -244,6 +261,7 @@ export type OptimizerJobStatus = 'queued' | 'running' | 'completed' | 'failed' |
 export interface OptimizerJobState {
   runId: number;
   drawType: DrawType;
+  strategy: PredictionStrategy;
   status: OptimizerJobStatus;
   startedAt: string;
   finishedAt: string | null;
@@ -258,6 +276,7 @@ export interface OptimizerJobState {
   bestScore: number | null;
   currentConfig: {
     lookbackWindow: number;
+    poolSize: number;
     weights: Record<string, number>;
     constraints: { enforceDiversity: boolean; minNumberSpread: number; maxSameGroup: number };
   } | null;
@@ -418,6 +437,7 @@ export const api = {
       get<OptimizerPreflightResponse>(`/api/optimizer/preflight/${drawType}`),
     startOptimizerRun: (body: {
       drawType: DrawType;
+      strategy?: PredictionStrategy;
       maxConfigurations?: number;
       stopOnFourHit?: boolean;
       populationSize?: number;

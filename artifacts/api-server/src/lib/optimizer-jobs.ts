@@ -29,6 +29,7 @@ import {
   type OptimizerResult,
   type OptimizerSearchOptions,
   type OptimizerStopReason,
+  type PredictionStrategy,
   type Uk49sDraw,
 } from "@workspace/db/schema";
 import { and, eq, inArray } from "drizzle-orm";
@@ -50,6 +51,7 @@ export const JOB_STALL_TIMEOUT_MS = 15 * 60 * 1000;
 
 export interface OptimizerJobConfig {
   lookbackWindow: number;
+  poolSize: number;
   weights: FeatureWeights;
   constraints: DiversityConstraints;
 }
@@ -57,6 +59,7 @@ export interface OptimizerJobConfig {
 export interface OptimizerJobPublicState {
   runId: number;
   drawType: DrawType;
+  strategy: PredictionStrategy;
   status: OptimizerJobStatus;
   startedAt: string;
   finishedAt: string | null;
@@ -94,6 +97,7 @@ export interface OptimizerJobPublicState {
 interface OptimizerJob {
   runId: number;
   drawType: DrawType;
+  strategy: PredictionStrategy;
   status: OptimizerJobStatus;
   startedAt: number;
   finishedAt: number | null;
@@ -161,6 +165,7 @@ function toPublic(job: OptimizerJob, includeResult = false): OptimizerJobPublicS
   const state: OptimizerJobPublicState = {
     runId: job.runId,
     drawType: job.drawType,
+    strategy: job.strategy,
     status: job.status,
     startedAt: new Date(job.startedAt).toISOString(),
     finishedAt: job.finishedAt ? new Date(job.finishedAt).toISOString() : null,
@@ -305,6 +310,8 @@ function toStoredConfigRow(
   return {
     runId,
     drawType,
+    strategy: config.strategy,
+    poolSize: config.poolSize,
     weightFrequency: config.weights.weightFrequency,
     weightRecency: config.weights.weightRecency,
     weightHotCold: config.weights.weightHotCold,
@@ -318,6 +325,7 @@ function toStoredConfigRow(
     weightPositional: config.weights.weightPositional,
     weightRepeat: config.weights.weightRepeat,
     weightFirst3Minus2: config.weights.weightFirst3Minus2,
+    weightBonusInfluence: config.weights.weightBonusInfluence,
     lookbackWindow: config.lookbackWindow,
     enforceDiversity: config.constraints.enforceDiversity,
     minNumberSpread: config.constraints.minNumberSpread,
@@ -450,6 +458,7 @@ async function finalizeSuccess(job: OptimizerJob, result: OptimizerResult): Prom
           target.validation4HitRate,
           target.validationAvgHits,
           target.validationSampleSize,
+          { strategy: target.strategy, poolSize: target.poolSize },
         );
         logger.info(
           { runId: job.runId, drawType: job.drawType, fourHit: job.fourHitFound },
@@ -497,6 +506,7 @@ export interface StartOptimizerJobParams {
  */
 export async function startOptimizerJob(params: StartOptimizerJobParams): Promise<OptimizerJobPublicState> {
   const { drawType, draws, optimizerConfig, validationDrawCount, autoWindow } = params;
+  const strategy: PredictionStrategy = optimizerConfig.strategy ?? "superhybrid";
   const maxConfigurations = params.maxConfigurations && params.maxConfigurations > 0 ? params.maxConfigurations : null;
   const stopOnFourHit = params.stopOnFourHit === true;
 
@@ -524,6 +534,7 @@ export async function startOptimizerJob(params: StartOptimizerJobParams): Promis
     .insert(uk49sOptimizerRuns)
     .values({
       drawType,
+      strategy,
       status: "queued",
       maxIterations: optimizerConfig.maxIterations,
       populationSize: optimizerConfig.populationSize,
@@ -551,6 +562,7 @@ export async function startOptimizerJob(params: StartOptimizerJobParams): Promis
   const job: OptimizerJob = {
     runId: run.id,
     drawType,
+    strategy,
     status: "queued",
     startedAt: Date.now(),
     finishedAt: null,
@@ -697,6 +709,7 @@ async function handleWorkerMessage(job: OptimizerJob, message: OptimizerWorkerMe
       job.fourHitFound = message.fourHitFound;
       job.currentConfig = {
         lookbackWindow: message.currentLookbackWindow,
+        poolSize: message.currentPoolSize,
         weights: message.currentWeights,
         constraints: message.currentConstraints,
       };
@@ -797,6 +810,7 @@ async function rebuildStateFromRow(runId: number): Promise<OptimizerJobPublicSta
   return {
     runId,
     drawType: row.drawType,
+    strategy: row.strategy as PredictionStrategy,
     status: row.status as OptimizerJobStatus,
     startedAt: row.startedAt.toISOString(),
     finishedAt: row.completedAt ? row.completedAt.toISOString() : null,

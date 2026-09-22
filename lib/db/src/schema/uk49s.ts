@@ -77,6 +77,10 @@ export const uk49sModelConfigs = pgTable("uk49s_model_configs", {
   drawType: drawTypeEnum("draw_type").notNull(),
   version: text("version").notNull(),
   status: modelStatusEnum("status").notNull().default("training"),
+  // Selectable prediction strategy: "superhybrid" (13 features) or "hybrid"
+  strategy: text("strategy").notNull().default("superhybrid"),
+  // Hybrid pool size (used by the hybrid strategy)
+  poolSize: integer("pool_size").notNull().default(10),
   // Feature weights (SuperHybrid components)
   weightFrequency: real("weight_frequency").notNull().default(1.0),
   weightRecency: real("weight_recency").notNull().default(1.0),
@@ -91,6 +95,8 @@ export const uk49sModelConfigs = pgTable("uk49s_model_configs", {
   weightPositional: real("weight_positional").notNull().default(1.0),
   weightRepeat: real("weight_repeat").notNull().default(1.0),
   weightFirst3Minus2: real("weight_first3_minus2").notNull().default(1.0),
+  // Booster-ball influence weight (hybrid strategy only)
+  weightBonusInfluence: real("weight_bonus_influence").notNull().default(0),
   // Lookback window for training
   lookbackWindow: integer("lookback_window").notNull().default(90),
   // Diversity/balance constraints
@@ -119,6 +125,10 @@ export const uk49sOptimizerConfigs = pgTable("uk49s_optimizer_configs", {
   id: serial("id").primaryKey(),
   runId: integer("run_id").references(() => uk49sOptimizerRuns.id).notNull(),
   drawType: drawTypeEnum("draw_type").notNull(),
+  // Strategy this configuration was evaluated with
+  strategy: text("strategy").notNull().default("superhybrid"),
+  // Hybrid pool size (hybrid strategy only)
+  poolSize: integer("pool_size").notNull().default(10),
   // Configuration parameters tested
   weightFrequency: real("weight_frequency").notNull(),
   weightRecency: real("weight_recency").notNull(),
@@ -133,6 +143,8 @@ export const uk49sOptimizerConfigs = pgTable("uk49s_optimizer_configs", {
   weightPositional: real("weight_positional").notNull(),
   weightRepeat: real("weight_repeat").notNull(),
   weightFirst3Minus2: real("weight_first3_minus2").notNull(),
+  // Booster-ball influence weight (hybrid strategy only)
+  weightBonusInfluence: real("weight_bonus_influence").notNull().default(0),
   lookbackWindow: integer("lookback_window").notNull(),
   enforceDiversity: boolean("enforce_diversity").notNull(),
   minNumberSpread: integer("min_number_spread").notNull(),
@@ -166,6 +178,8 @@ export const uk49sOptimizerRuns = pgTable("uk49s_optimizer_runs", {
   id: serial("id").primaryKey(),
   drawType: drawTypeEnum("draw_type").notNull(),
   status: optimizerStatusEnum("status").notNull().default("pending"),
+  // Strategy the run searched: "superhybrid" or "hybrid"
+  strategy: text("strategy").notNull().default("superhybrid"),
   // Search parameters
   maxIterations: integer("max_iterations").notNull().default(1000),
   populationSize: integer("population_size").notNull().default(100),

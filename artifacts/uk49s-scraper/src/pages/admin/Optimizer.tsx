@@ -13,12 +13,14 @@ import {
 } from 'lucide-react';
 import {
   api,
+  PREDICTION_STRATEGY_OPTIONS,
   type DrawType,
   type OptimizerDiagnosticReport,
   type OptimizerJobState,
   type OptimizerJobStatus,
   type OptimizerStopReason,
   type OptimizerWindow,
+  type PredictionStrategy,
 } from '@/lib/api';
 import { useAsync, formatDateTime } from '@/lib/useAsync';
 import {
@@ -100,6 +102,7 @@ function stopReasonText(reason: OptimizerStopReason | null, job: OptimizerJobSta
 
 export default function AdminOptimizer() {
   const [drawType, setDrawType] = useState<DrawType>('lunchtime');
+  const [strategy, setStrategy] = useState<PredictionStrategy>('superhybrid');
   const [job, setJob] = useState<OptimizerJobState | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [customWindow, setCustomWindow] = useState(false);
@@ -120,6 +123,8 @@ export default function AdminOptimizer() {
   const history = useAsync(() => api.getOptimizerHistory(drawType), [drawType]);
 
   const label = drawType === 'lunchtime' ? 'Lunchtime' : 'Teatime';
+  const strategyOption =
+    PREDICTION_STRATEGY_OPTIONS.find((option) => option.value === strategy) ?? PREDICTION_STRATEGY_OPTIONS[0];
   const validationWindow = preflight.data?.window ?? null;
   const runs = history.data?.optimizationRuns ?? [];
   const isLive = job?.status === 'running' || job?.status === 'queued';
@@ -202,6 +207,7 @@ export default function AdminOptimizer() {
     try {
       const body: Parameters<typeof api.startOptimizerRun>[0] = {
         drawType,
+        strategy,
         maxConfigurations,
         stopOnFourHit,
         applyToModel,
@@ -540,6 +546,20 @@ export default function AdminOptimizer() {
             </p>
           </div>
 
+          <Field label="Prediction strategy" hint={strategyOption.hint}>
+            <Select
+              value={strategy}
+              onChange={(e) => setStrategy(e.target.value as PredictionStrategy)}
+              disabled={isLive}
+            >
+              {PREDICTION_STRATEGY_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Max configurations" hint="Hard stop — the search can never run indefinitely">
               <Select
@@ -635,8 +655,9 @@ export default function AdminOptimizer() {
           />
 
           <div className="space-y-4 p-5">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               <StatCard label="Started" value={<span className="text-[15px]">{formatDateTime(job.startedAt)}</span>} tone="violet" />
+              <StatCard label="Strategy" value={<span className="text-[15px]">{job.strategy === 'hybrid' ? 'Super Hybrid' : 'SuperHybrid'}</span>} tone="sky" />
               <StatCard label="Configurations tested" value={job.configsTested} tone="violet" />
               <StatCard label="Configurations failed" value={job.configsFailed} tone="coral" />
               <StatCard label="Current best average" value={job.bestAvgHits != null ? job.bestAvgHits.toFixed(2) : '—'} tone="mint" />
@@ -783,6 +804,7 @@ export default function AdminOptimizer() {
               <thead>
                 <tr>
                   <th>Started</th>
+                  <th>Strategy</th>
                   <th>Status</th>
                   <th>Configs tested</th>
                   <th>Stopped because</th>
@@ -796,6 +818,9 @@ export default function AdminOptimizer() {
                 {runs.map((run) => (
                   <tr key={run.id}>
                     <td className="strong">{formatDateTime(run.startedAt ?? run.completedAt)}</td>
+                    <td className="text-[11.5px] text-[var(--text-3)]">
+                      {run.strategy === 'hybrid' ? 'Super Hybrid' : 'SuperHybrid'}
+                    </td>
                     <td>
                       <Badge tone={statusTone(run.status as OptimizerJobStatus)}>{run.status}</Badge>
                       {run.errorMessage && run.status === 'failed' ? (

@@ -13,9 +13,10 @@ import { uk49sDraws, uk49sOptimizerRuns, uk49sOptimizerConfigs, type DrawType } 
 import {
   crossValidateModel,
   calculateStabilityMetrics,
+  isPredictionStrategy,
   type CrossValidationResult,
 } from "@workspace/db/schema";
-import { DEFAULT_WEIGHTS, type OptimizerConfig } from "@workspace/db/schema";
+import { DEFAULT_WEIGHTS, type OptimizerConfig, type PredictionStrategy } from "@workspace/db/schema";
 import { updateActiveModel } from "../lib/prediction-service";
 import {
   MIN_VALIDATION_DRAWS,
@@ -166,6 +167,7 @@ router.post(
   asyncHandler(async (req, res) => {
     const {
       drawType: rawDrawType,
+      strategy: rawStrategy,
       maxConfigurations,
       stopOnFourHit = true,
       maxIterations = 1000,
@@ -188,6 +190,8 @@ router.post(
       res.status(400).json({ error: "drawType must be 'lunchtime' or 'teatime'" });
       return;
     }
+
+    const strategy: PredictionStrategy = isPredictionStrategy(rawStrategy) ? rawStrategy : "superhybrid";
 
     /**
      * Search size. The strategy itself is unchanged (random search over
@@ -244,6 +248,7 @@ router.post(
 
       const optimizerConfig: OptimizerConfig = {
         drawType,
+        strategy,
         maxIterations,
         populationSize: resolvedPopulationSize,
         eliteSize: resolvedEliteSize,
@@ -261,6 +266,7 @@ router.post(
       logger.info(
         {
           drawType,
+          strategy,
           maxConfigurations: resolvedMaxConfigurations,
           stopOnFourHit: stopOnFourHit !== false,
           populationSize: resolvedPopulationSize,
@@ -284,6 +290,7 @@ router.post(
       res.status(202).json({
         success: true,
         runId: state.runId,
+        strategy,
         window,
         checks,
         target: { hits: 4, maxConfigurations: resolvedMaxConfigurations, stopOnFourHit: stopOnFourHit !== false },
@@ -344,6 +351,7 @@ router.get(
       job: {
         runId: row.id,
         drawType: row.drawType,
+        strategy: row.strategy as PredictionStrategy,
         status: row.status,
         startedAt: row.startedAt.toISOString(),
         finishedAt: row.completedAt ? row.completedAt.toISOString() : null,
@@ -454,6 +462,8 @@ router.post(
         return;
       }
 
+      const appliedStrategy: PredictionStrategy = isPredictionStrategy(best.strategy) ? best.strategy : "superhybrid";
+
       const modelId = await updateActiveModel(
         run.drawType,
         {
@@ -470,6 +480,7 @@ router.post(
           weightPositional: best.weightPositional,
           weightRepeat: best.weightRepeat,
           weightFirst3Minus2: best.weightFirst3Minus2,
+          weightBonusInfluence: best.weightBonusInfluence,
         },
         best.lookbackWindow,
         {
@@ -480,6 +491,7 @@ router.post(
         best.validation4HitRate ?? 0,
         best.validationAvgHits ?? 0,
         best.validationSampleSize ?? 0,
+        { strategy: appliedStrategy, poolSize: best.poolSize },
       );
 
       await db
@@ -493,6 +505,7 @@ router.post(
         success: true,
         runId,
         drawType: run.drawType,
+        strategy: appliedStrategy,
         configId: best.id,
         newModelId: modelId,
         fourHitFound: best.fourHitFound,
@@ -652,6 +665,7 @@ router.get(
       optimizationRuns: runs.map((run) => ({
         id: run.id,
         drawType: run.drawType,
+        strategy: isPredictionStrategy(run.strategy) ? run.strategy : "superhybrid",
         status: run.status,
         configsTested: run.configsTested,
         configsFailed: run.configsFailed,
@@ -710,6 +724,7 @@ router.get(
       run: {
         id: run.id,
         drawType: run.drawType,
+        strategy: isPredictionStrategy(run.strategy) ? run.strategy : "superhybrid",
         status: run.status,
         configsTested: run.configsTested,
         configsFailed: run.configsFailed,
@@ -749,6 +764,8 @@ router.get(
       },
       liveProgress: live ?? null,
       topConfigurations: configs.map((config) => ({
+        strategy: isPredictionStrategy(config.strategy) ? config.strategy : "superhybrid",
+        poolSize: config.poolSize,
         weights: {
           weightFrequency: config.weightFrequency,
           weightRecency: config.weightRecency,
@@ -763,6 +780,7 @@ router.get(
           weightPositional: config.weightPositional,
           weightRepeat: config.weightRepeat,
           weightFirst3Minus2: config.weightFirst3Minus2,
+          weightBonusInfluence: config.weightBonusInfluence,
         },
         lookbackWindow: config.lookbackWindow,
         constraints: {

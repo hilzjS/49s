@@ -8,6 +8,13 @@
 import type { Uk49sDraw, DrawType } from "./uk49s";
 import { DEFAULT_WEIGHTS, type FeatureWeights, type DiversityConstraints } from "./feature-engine";
 import { runBacktest, type BacktestConfig, type BacktestResult } from "./backtest-engine";
+import {
+  DEFAULT_HYBRID_POOL_SIZE,
+  DEFAULT_HYBRID_WEIGHTS,
+  HYBRID_LOOKBACK_OPTIONS,
+  HYBRID_POOL_OPTIONS,
+  type PredictionStrategy,
+} from "./hybrid-strategy";
 
 export interface OptimizerConfig {
   drawType: DrawType;
@@ -23,6 +30,10 @@ export interface OptimizerConfig {
   testEndDate?: string;
   minValidationSamples: number;
   randomSeed?: number;
+  /** Selectable strategy to optimize: "superhybrid" (default) or "hybrid". */
+  strategy?: PredictionStrategy;
+  /** Hybrid pool size the search starts from (hybrid strategy only). */
+  hybridPoolSize?: number;
 }
 
 /** Why the search stopped. */
@@ -68,9 +79,13 @@ export interface OptimizerResult {
 }
 
 export interface ConfigurationResult {
+  /** Strategy this configuration was evaluated with. */
+  strategy: PredictionStrategy;
   weights: FeatureWeights;
   constraints: DiversityConstraints;
   lookbackWindow: number;
+  /** Hybrid pool size (meaningful for the hybrid strategy). */
+  poolSize: number;
   validation4HitRate: number;
   validationAvgHits: number;
   validationSampleSize: number;
@@ -111,6 +126,7 @@ export interface OptimizerProgress {
     weights: FeatureWeights;
     constraints: DiversityConstraints;
     lookbackWindow: number;
+    poolSize: number;
   };
   phase: "random-search" | "hill-climbing";
   /** Best single-prediction hit count seen so far. */
@@ -127,6 +143,28 @@ const WEIGHT_MAX = 3.0;
 const WEIGHT_STEP = 0.1;
 
 const LOOKBACK_OPTIONS = [30, 60, 90, 180, 365];
+
+/**
+ * The weights the hybrid strategy actually uses. Everything else stays at 0 so
+ * the 3-component score is not polluted by unused features.
+ */
+const HYBRID_WEIGHT_KEYS: (keyof FeatureWeights)[] = [
+  "weightFrequency",
+  "weightGapAnalysis",
+  "weightBonusInfluence",
+];
+
+function lookbackOptionsFor(strategy: PredictionStrategy): readonly number[] {
+  return strategy === "hybrid" ? HYBRID_LOOKBACK_OPTIONS : LOOKBACK_OPTIONS;
+}
+
+function weightKeysFor(strategy: PredictionStrategy): (keyof FeatureWeights)[] {
+  return strategy === "hybrid" ? HYBRID_WEIGHT_KEYS : (Object.keys(DEFAULT_WEIGHTS) as (keyof FeatureWeights)[]);
+}
+
+function baseWeightsFor(strategy: PredictionStrategy): FeatureWeights {
+  return strategy === "hybrid" ? { ...DEFAULT_HYBRID_WEIGHTS } : { ...DEFAULT_WEIGHTS };
+}
 
 // Seeded random for reproducibility
 function seededRandom(seed: number): () => number {
@@ -145,49 +183,55 @@ function randomFloat(rng: () => number, min: number, max: number): number {
   return rng() * (max - min) + min;
 }
 
+interface SearchConfig {
+  weights: FeatureWeights;
+  constraints: DiversityConstraints;
+  lookbackWindow: number;
+  poolSize: number;
+}
+
 // Generate random configuration
-function generateRandomConfig(
-  rng: () => number,
-  seed: number
-): { weights: FeatureWeights; constraints: DiversityConstraints; lookbackWindow: number } {
-  const weights: FeatureWeights = { ...DEFAULT_WEIGHTS };
-  
-  // Mutate weights
-  for (const key of Object.keys(weights) as (keyof FeatureWeights)[]) {
+function generateRandomConfig(rng: () => number, seed: number, strategy: PredictionStrategy): SearchConfig {
+  const weights: FeatureWeights = baseWeightsFor(strategy);
+
+  // Mutate the weights the strategy actually uses
+  for (const key of weightKeysFor(strategy)) {
     weights[key] = Math.round(randomFloat(rng, WEIGHT_MIN, WEIGHT_MAX) / WEIGHT_STEP) * WEIGHT_STEP;
   }
-  
+
   // Random constraints
   const constraints: DiversityConstraints = {
     enforceDiversity: rng() > 0.3,
     minNumberSpread: randomInt(rng, 5, 20),
     maxSameGroup: randomInt(rng, 1, 3),
   };
-  
-  // Random lookback window
-  const lookbackWindow = LOOKBACK_OPTIONS[randomInt(rng, 0, LOOKBACK_OPTIONS.length - 1)];
-  
-  return { weights, constraints, lookbackWindow };
+
+  // Random lookback window (strategy-appropriate set)
+  const lookbackOptions = lookbackOptionsFor(strategy);
+  const lookbackWindow = lookbackOptions[randomInt(rng, 0, lookbackOptions.length - 1)];
+
+  const poolSize =
+    strategy === "hybrid"
+      ? HYBRID_POOL_OPTIONS[randomInt(rng, 0, HYBRID_POOL_OPTIONS.length - 1)]
+      : DEFAULT_HYBRID_POOL_SIZE;
+
+  return { weights, constraints, lookbackWindow, poolSize };
 }
 
 // Mutate a configuration (for hill climbing)
-function mutateConfig(
-  config: { weights: FeatureWeights; constraints: DiversityConstraints; lookbackWindow: number },
-  rng: () => number,
-  mutationRate: number
-): { weights: FeatureWeights; constraints: DiversityConstraints; lookbackWindow: number } {
+function mutateConfig(config: SearchConfig, rng: () => number, mutationRate: number, strategy: PredictionStrategy): SearchConfig {
   const newWeights = { ...config.weights };
   const newConstraints = { ...config.constraints };
-  
-  // Mutate each weight with probability mutationRate
-  for (const key of Object.keys(newWeights) as (keyof FeatureWeights)[]) {
+
+  // Mutate each used weight with probability mutationRate
+  for (const key of weightKeysFor(strategy)) {
     if (rng() < mutationRate) {
       // Add or subtract a small amount
       const delta = (rng() > 0.5 ? 1 : -1) * WEIGHT_STEP;
       newWeights[key] = Math.max(WEIGHT_MIN, Math.min(WEIGHT_MAX, newWeights[key] + delta));
     }
   }
-  
+
   // Mutate constraints
   if (rng() < mutationRate) {
     newConstraints.enforceDiversity = !newConstraints.enforceDiversity;
@@ -198,21 +242,30 @@ function mutateConfig(
   if (rng() < mutationRate) {
     newConstraints.maxSameGroup = Math.max(1, Math.min(3, newConstraints.maxSameGroup + (rng() > 0.5 ? 1 : -1)));
   }
-  
+
   // Occasionally change lookback window
-  if (rng() < mutationRate * 0.3) {
-    config.lookbackWindow = LOOKBACK_OPTIONS[randomInt(rng, 0, LOOKBACK_OPTIONS.length - 1)];
-  }
-  
-  return { weights: newWeights, constraints: newConstraints, lookbackWindow: config.lookbackWindow };
+  const lookbackOptions = lookbackOptionsFor(strategy);
+  const lookbackWindow =
+    rng() < mutationRate * 0.3
+      ? lookbackOptions[randomInt(rng, 0, lookbackOptions.length - 1)]
+      : config.lookbackWindow;
+
+  // Occasionally change the hybrid pool size
+  const poolSize =
+    strategy === "hybrid" && rng() < mutationRate * 0.3
+      ? HYBRID_POOL_OPTIONS[randomInt(rng, 0, HYBRID_POOL_OPTIONS.length - 1)]
+      : config.poolSize;
+
+  return { weights: newWeights, constraints: newConstraints, lookbackWindow, poolSize };
 }
 
 // Evaluate a configuration
 function evaluateConfig(
   draws: Uk49sDraw[],
-  config: { weights: FeatureWeights; constraints: DiversityConstraints; lookbackWindow: number },
+  config: SearchConfig,
   optimizerConfig: OptimizerConfig,
-  seed: number
+  seed: number,
+  strategy: PredictionStrategy
 ): ConfigurationResult {
   const backtestConfig: BacktestConfig = {
     drawType: optimizerConfig.drawType,
@@ -220,6 +273,8 @@ function evaluateConfig(
     testStartDate: optimizerConfig.validationStartDate,
     testEndDate: optimizerConfig.validationEndDate,
     randomSeed: seed,
+    strategy,
+    poolSize: config.poolSize,
   };
   
   const result = runBacktest(draws, backtestConfig, config.weights, config.constraints);
@@ -254,9 +309,11 @@ function evaluateConfig(
     );
   
     return {
+      strategy,
       weights: config.weights,
       constraints: config.constraints,
       lookbackWindow: config.lookbackWindow,
+      poolSize: config.poolSize,
       validation4HitRate: result.fourHitRate,
       validationAvgHits: result.avgMainHits,
       validationSampleSize: result.totalPredictions,
@@ -276,6 +333,8 @@ export function optimizeModel(
   progressCallback?: (progress: OptimizerProgress) => void,
   searchOptions?: OptimizerSearchOptions
 ): OptimizerResult {
+  const strategy: PredictionStrategy = optimizerConfig.strategy ?? "superhybrid";
+
   const rng = optimizerConfig.randomSeed
     ? seededRandom(optimizerConfig.randomSeed)
     : Math.random;
@@ -331,8 +390,8 @@ export function optimizeModel(
 
     // Keep seeds within Postgres int4 range
     const seed = optimizerConfig.randomSeed ? optimizerConfig.randomSeed + i : (1 + i * 7919) % 2147483647;
-    const config = generateRandomConfig(rng, seed);
-    const result = evaluateConfig(draws, config, optimizerConfig, seed);
+    const config = generateRandomConfig(rng, seed, strategy);
+    const result = evaluateConfig(draws, config, optimizerConfig, seed, strategy);
 
     const stop = recordResult(result);
 
@@ -367,10 +426,11 @@ export function optimizeModel(
       break;
     }
 
-    const eliteConfig = {
+    const eliteConfig: SearchConfig = {
       weights: elite.weights,
       constraints: elite.constraints,
       lookbackWindow: elite.lookbackWindow,
+      poolSize: elite.poolSize,
     };
 
     for (let i = 0; i < 50; i++) {
@@ -379,10 +439,10 @@ export function optimizeModel(
         break;
       }
 
-      const mutated = mutateConfig(eliteConfig, rng, optimizerConfig.mutationRate);
+      const mutated = mutateConfig(eliteConfig, rng, optimizerConfig.mutationRate, strategy);
       // Keep seeds within Postgres int4 range
       const hillSeed = ((optimizerConfig.randomSeed ?? 1) * 100003 + i * 997) % 2147483647;
-      const result = evaluateConfig(draws, mutated, optimizerConfig, hillSeed);
+      const result = evaluateConfig(draws, mutated, optimizerConfig, hillSeed, strategy);
 
       const score = result.validation4HitRate * 100 + (result.stabilityScore * 0.1);
             allResults.push(result);
@@ -447,6 +507,8 @@ export function optimizeModel(
       testStartDate: optimizerConfig.testStartDate,
       testEndDate: optimizerConfig.testEndDate,
       randomSeed: optimizerConfig.randomSeed,
+      strategy,
+      poolSize: bestResult.poolSize,
     };
     testResult = runBacktest(draws, testConfig, bestResult.weights, bestResult.constraints);
   }
@@ -458,6 +520,8 @@ export function optimizeModel(
     testStartDate: optimizerConfig.validationStartDate,
     testEndDate: optimizerConfig.validationEndDate,
     randomSeed: optimizerConfig.randomSeed,
+    strategy,
+    poolSize: bestResult.poolSize,
   };
   const validationResult = runBacktest(draws, finalValidationConfig, bestResult.weights, bestResult.constraints);
 

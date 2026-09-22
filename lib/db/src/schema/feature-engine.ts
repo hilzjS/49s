@@ -26,6 +26,11 @@ export interface FeatureWeights {
   weightPositional: number;
   weightRepeat: number;
   weightFirst3Minus2: number;
+  /**
+   * Booster-ball influence. Only used by the selectable "hybrid" strategy
+   * (see hybrid-strategy.ts); the 13-feature SuperHybrid engine ignores it.
+   */
+  weightBonusInfluence: number;
 }
 
 // Default weights for SuperHybrid strategy
@@ -43,6 +48,7 @@ export const DEFAULT_WEIGHTS: FeatureWeights = {
   weightPositional: 1.5,
   weightRepeat: 1.0,
   weightFirst3Minus2: 1.5,
+  weightBonusInfluence: 0.0,
 };
 
 // Feature result structure
