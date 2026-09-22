@@ -1,11 +1,12 @@
 // Development entrypoint used by the app preview.
 //
 // Starts two processes together:
-//   - the API server (Express) on API_PORT (default 3000)
+//   - the API server (Express) on a free port (API_PORT, default 3000)
 //   - the dashboard (Vite) on the port the platform provides via --port
 // The dashboard's /api requests are proxied to the API server, so the preview
 // renders the real application UI.
 import { spawn } from "node:child_process";
+import net from "node:net";
 
 const args = process.argv.slice(2);
 
@@ -26,8 +27,32 @@ function readFlag(name, fallback) {
 }
 
 const webPort = readFlag("--port", process.env.PORT ?? "5000");
-const apiPort = process.env.API_PORT ?? "3000";
+
+/**
+ * A previous dev run can leave an orphaned API process holding the default
+ * port. Without this, the freshly started server exits with EADDRINUSE while
+ * the stale process keeps serving old code. Probe upwards for a free port.
+ */
+async function findFreePort(startPort, attempts = 20) {
+  for (let port = startPort; port < startPort + attempts; port += 1) {
+    const free = await new Promise((resolve) => {
+      const probe = net.createServer();
+      probe.unref();
+      probe.once("error", () => resolve(false));
+      probe.listen(port, () => probe.close(() => resolve(true)));
+    });
+
+    if (free) return port;
+  }
+
+  return startPort;
+}
+
+const requestedApiPort = Number(process.env.API_PORT ?? "3000");
+const apiPort = await findFreePort(requestedApiPort);
 const proxyTarget = `http://localhost:${apiPort}`;
+
+console.log(`[dev] api port ${apiPort} (requested ${requestedApiPort}) → ${proxyTarget}`);
 
 function start(label, command, env) {
   const child = spawn(command, {
@@ -44,7 +69,7 @@ function start(label, command, env) {
 }
 
 const api = start("api", "pnpm --filter @workspace/api-server run dev", {
-  PORT: apiPort,
+  PORT: String(apiPort),
   API_PROXY_TARGET: proxyTarget,
 });
 

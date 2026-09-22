@@ -59,9 +59,22 @@ function resolveConnection(connectionString: string): {
   return { connectionString: clean, ssl: { rejectUnauthorized: false } };
 }
 
+/**
+ * Accepts the common names a managed PostgreSQL provider may use, so the
+ * server works whether the connection string was provisioned as
+ * `DATABASE_URL` or as a provider-specific variable.
+ */
+function resolveConnectionString(): string | undefined {
+  return (
+    process.env.DATABASE_URL ??
+    process.env.SUPABASE_DB_URL ??
+    process.env.POSTGRES_URL
+  );
+}
+
 function getPool(): pg.Pool {
   if (!poolInstance) {
-    const connectionString = process.env.DATABASE_URL;
+    const connectionString = resolveConnectionString();
 
     if (!connectionString) {
       throw new Error(
