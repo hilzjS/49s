@@ -290,3 +290,20 @@ CREATE INDEX IF NOT EXISTS uk49s_predictions_type_status_idx
 
 CREATE INDEX IF NOT EXISTS uk49s_predictions_type_date_idx
   ON uk49s_predictions (draw_type, prediction_date);
+
+-- ---------------------------------------------------------------------------
+-- Row Level Security
+-- ---------------------------------------------------------------------------
+-- The application connects directly to PostgreSQL as the database owner and
+-- never uses Supabase's Data API (no anon/service-role key is shipped to the
+-- client). Enabling RLS with no policies denies the `anon`/`authenticated`
+-- Data API roles by default, while the owner connection (which bypasses RLS)
+-- keeps full access. This prevents the public anon key from reading or writing
+-- these tables through PostgREST/GraphQL.
+ALTER TABLE uk49s_scrape_runs      ENABLE ROW LEVEL SECURITY;
+ALTER TABLE uk49s_model_configs    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE uk49s_optimizer_runs   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE uk49s_draws            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE uk49s_optimizer_configs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE uk49s_backtest_runs    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE uk49s_predictions      ENABLE ROW LEVEL SECURITY;
