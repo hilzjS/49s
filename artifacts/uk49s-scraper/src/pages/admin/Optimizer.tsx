@@ -1,7 +1,14 @@
-import { useEffect, useState } from 'react';
-import { FlaskConical, Play } from 'lucide-react';
-import { api, type DrawType } from '@/lib/api';
-import { useAsync, formatDate, isoDaysAgo, shiftIsoDate } from '@/lib/useAsync';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Activity, CheckCircle2, FlaskConical, Play, ShieldCheck, Square, TriangleAlert, Wand2 } from 'lucide-react';
+import {
+  api,
+  type DrawType,
+  type OptimizerDiagnosticReport,
+  type OptimizerJobState,
+  type OptimizerJobStatus,
+  type OptimizerWindow,
+} from '@/lib/api';
+import { useAsync, formatDateTime } from '@/lib/useAsync';
 import {
   Badge,
   Button,
@@ -10,71 +17,211 @@ import {
   Field,
   Input,
   PanelHeader,
+  ProgressBar,
   Spinner,
   StatCard,
   Tabs,
   percent,
 } from '@/components/ui';
 
+/** Formats a YYYY-MM-DD draw date without any timezone shift. */
+function formatIsoDate(value: string | null | undefined): string {
+  if (!value) return '—';
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  if (!match) return value;
+  const [, year, month, day] = match;
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' });
+}
+
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes === 0) return `${seconds}s`;
+  return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+}
+
+function statusTone(status: OptimizerJobStatus): 'mint' | 'sky' | 'coral' | 'gold' | 'neutral' {
+  switch (status) {
+    case 'completed':
+      return 'mint';
+    case 'running':
+      return 'sky';
+    case 'queued':
+      return 'gold';
+    case 'failed':
+      return 'coral';
+    default:
+      return 'neutral';
+  }
+}
+
+function windowLabel(window: OptimizerWindow | null | undefined): string {
+  if (!window) return '—';
+  return `${formatIsoDate(window.validationStartDate)} → ${formatIsoDate(window.validationEndDate)}`;
+}
+
 export default function AdminOptimizer() {
   const [drawType, setDrawType] = useState<DrawType>('lunchtime');
-  const [maxIterations, setMaxIterations] = useState(500);
-  const [validationStartDate, setValidationStartDate] = useState(isoDaysAgo(365));
-  const [validationEndDate, setValidationEndDate] = useState(isoDaysAgo(180));
-  const [applyToModel, setApplyToModel] = useState(true);
+  const [job, setJob] = useState<OptimizerJobState | null>(null);
+  const [advanced, setAdvanced] = useState(false);
+  const [customWindow, setCustomWindow] = useState(false);
+  const [customStart, setCustomStart] = useState('');
+  const [customEnd, setCustomEnd] = useState('');
+  const [populationSize, setPopulationSize] = useState(100);
+  const [applyToModel, setApplyToModel] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+  const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [diagnostic, setDiagnostic] = useState<OptimizerDiagnosticReport | null>(null);
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
 
+  const preflight = useAsync(() => api.getOptimizerPreflight(drawType), [drawType]);
   const history = useAsync(() => api.getOptimizerHistory(drawType), [drawType]);
-  const summary = useAsync(() => api.getDataSummary(), []);
-  const runs = history.data?.optimizationRuns ?? [];
-  const best = runs.find((run) => run.bestMetrics.fourHitRate != null);
 
   const label = drawType === 'lunchtime' ? 'Lunchtime' : 'Teatime';
-  const latestDrawDate =
-    (drawType === 'lunchtime' ? summary.data?.lunchtime.latestDate : summary.data?.teatime.latestDate) ?? null;
+  const window = preflight.data?.window ?? null;
+  const runs = history.data?.optimizationRuns ?? [];
+  const isLive = job?.status === 'running' || job?.status === 'queued';
+  const pollRef = useRef<number | null>(null);
 
-  // Validation is scored by the backtest engine, which closes its window with
-  // the first draw after the end date — so the window must stop short of the
-  // latest draw.
+  // Adopt an already-running job when the page opens (e.g. after a reload).
   useEffect(() => {
-    if (!latestDrawDate) return;
-    const end = shiftIsoDate(latestDrawDate, -1);
-    setValidationEndDate(end);
-    setValidationStartDate(shiftIsoDate(end, -180));
-  }, [latestDrawDate]);
-
-  async function run() {
-    if (latestDrawDate && validationEndDate >= latestDrawDate) {
-      setMessage(null);
-      setError(
-        `Validation end must be before the latest ${label} draw (${latestDrawDate}) — the engine needs a later draw to close the window.`,
-      );
-      return;
+    const active = preflight.data?.activeJob ?? null;
+    if (active) {
+      setJob((current) => (current && current.runId === active.runId ? current : active));
     }
+  }, [preflight.data]);
 
+  // Seed the advanced custom dates from the automatically selected window.
+  useEffect(() => {
+    if (!window) return;
+    setCustomStart((value) => value || window.validationStartDate);
+    setCustomEnd((value) => value || window.validationEndDate);
+  }, [window]);
+
+  // Live progress polling. Only runs while a job is queued or running.
+  useEffect(() => {
+    if (!job || !isLive) return;
+
+    const runId = job.runId;
+    let cancelled = false;
+
+    const tick = async () => {
+      try {
+        const response = await api.getOptimizerStatus(runId);
+        if (cancelled) return;
+        setJob(response.job);
+        if (response.job.status !== 'running' && response.job.status !== 'queued') {
+          history.reload();
+          preflight.reload();
+        }
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to read optimizer progress');
+      }
+    };
+
+    const id = window.setInterval(tick, 1200);
+    pollRef.current = id;
+    void tick();
+
+    return () => {
+      cancelled = true;
+      if (pollRef.current !== null) window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.runId, isLive]);
+
+  const estimatedTotal = useMemo(() => populationSize + 10 * 50, [populationSize]);
+  const totalConfigs = job && job.totalConfigs > 0 ? job.totalConfigs : estimatedTotal;
+  const testedRatio = totalConfigs > 0 && job ? Math.min(100, (job.configsTested / totalConfigs) * 100) : 0;
+
+  const bestEvaluatedRun = runs.find(
+    (run) => run.status === 'completed' && run.bestMetrics.fourHitRate != null && run.configsTested > 0,
+  );
+
+  async function runAuto() {
     setBusy(true);
-    setMessage(null);
     setError(null);
+    setMessage(null);
+
     try {
-      const result = await api.runOptimizer({
+      const body: Parameters<typeof api.startOptimizerRun>[0] = {
         drawType,
-        maxIterations,
-        validationStartDate,
-        validationEndDate,
+        populationSize,
         applyToModel,
-      });
+      };
+
+      if (customWindow) {
+        body.customWindow = true;
+        body.validationStartDate = customStart;
+        body.validationEndDate = customEnd;
+      }
+
+      const response = await api.startOptimizerRun(body);
+      setJob(response.job);
       setMessage(
-        result.newModelId
-          ? `Optimizer finished and applied a new model (#${result.newModelId}).`
-          : 'Optimizer finished. Best configuration stored.',
+        `Optimization started for the ${label} model — validation ${windowLabel(response.window)} (${response.window.validationDrawCount} draws).`,
       );
+      preflight.reload();
       history.reload();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Optimizer failed');
+      setError(err instanceof Error ? err.message : 'Failed to start the optimizer');
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function cancel() {
+    if (!job) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await api.cancelOptimizerRun(job.runId);
+      setJob(response.job);
+      setMessage('Optimization cancelled.');
+      history.reload();
+      preflight.reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to cancel the optimizer');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyBest() {
+    if (!job) return;
+    setApplying(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const response = await api.applyOptimizerBest(job.runId);
+      setMessage(
+        `Best configuration of run #${response.runId} applied as the active ${label} model (model #${response.newModelId}).`,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to apply the best configuration');
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  async function runDiagnostic() {
+    setDiagnosing(true);
+    setDiagnostic(null);
+    setDiagnosticError(null);
+    try {
+      const response = await api.runOptimizerDiagnostic({ drawType, sampleSize: 10 });
+      setDiagnostic(response.report);
+    } catch (err) {
+      setDiagnosticError(err instanceof Error ? err.message : 'Diagnostic failed');
+    } finally {
+      setDiagnosing(false);
     }
   }
 
@@ -85,7 +232,7 @@ export default function AdminOptimizer() {
           <p className="eyebrow">Administration</p>
           <h1 className="mt-1.5 text-[26px] font-semibold tracking-[-0.02em]">Optimizer</h1>
           <p className="mt-1 text-[13px] text-[var(--text-3)]">
-            Evolve model feature weights against a validation window.
+            Evaluating configurations against the existing predictor for the {label} model.
           </p>
         </div>
         <Tabs
@@ -99,84 +246,415 @@ export default function AdminOptimizer() {
       </div>
 
       {message ? (
-        <div className="rounded-lg border border-[var(--mint)]/40 bg-[var(--mint)]/10 px-4 py-3 text-[12.5px] text-[#9ff0d0]">{message}</div>
+        <div className="rounded-lg border border-[var(--mint)]/40 bg-[var(--mint)]/10 px-4 py-3 text-[12.5px] text-[#9ff0d0]">
+          {message}
+        </div>
       ) : null}
       {error ? (
-        <div className="rounded-lg border border-[var(--coral)]/40 bg-[var(--coral)]/10 px-4 py-3 text-[12.5px] text-[#ffc0b8]">{error}</div>
+        <div className="rounded-lg border border-[var(--coral)]/40 bg-[var(--coral)]/10 px-4 py-3 text-[12.5px] text-[#ffc0b8]">
+          {error}
+        </div>
       ) : null}
 
       <div className="grid gap-4 sm:grid-cols-3">
-        <StatCard label="Runs" value={runs.length} hint={`${drawType} history`} tone="sky" />
+        <StatCard label="Runs" value={runs.length} hint={`${label} history`} tone="sky" />
         <StatCard
           label="Best 4-hit rate"
-          value={best ? percent(best.bestMetrics.fourHitRate) : '—'}
-          hint="Validation window"
+          value={bestEvaluatedRun ? percent(bestEvaluatedRun.bestMetrics.fourHitRate) : '—'}
+          hint="Successfully evaluated runs"
           tone="gold"
         />
         <StatCard
           label="Best avg hits"
-          value={best && best.bestMetrics.avgHits != null ? best.bestMetrics.avgHits.toFixed(2) : '—'}
-          hint="Validation window"
+          value={
+            bestEvaluatedRun && bestEvaluatedRun.bestMetrics.avgHits != null
+              ? bestEvaluatedRun.bestMetrics.avgHits.toFixed(2)
+              : '—'
+          }
+          hint="Successfully evaluated runs"
           tone="mint"
         />
       </div>
 
+      {/* Automatic validation window + preflight checks ---------------------- */}
       <Card>
         <PanelHeader
-          title="Run the optimizer"
-          subtitle="Requires the admin key (set it on the Scraper page)"
-          right={<Play size={16} className="text-[var(--text-3)]" />}
+          title="Automatic data validation"
+          subtitle={`Selected from stored ${label} history — no manual dates required`}
+          right={<ShieldCheck size={16} className="text-[var(--mint)]" />}
         />
-        <div className="flex flex-wrap items-end gap-3 p-5">
-          <Field label="Max iterations">
-            <Input
-              type="number"
-              min={10}
-              max={5000}
-              value={maxIterations}
-              onChange={(e) => setMaxIterations(Number(e.target.value))}
-            />
-          </Field>
-          <Field label="Validation start">
-            <Input type="date" value={validationStartDate} onChange={(e) => setValidationStartDate(e.target.value)} />
-          </Field>
-          <Field label="Validation end">
-            <Input type="date" value={validationEndDate} onChange={(e) => setValidationEndDate(e.target.value)} />
-          </Field>
-          <label className="flex items-center gap-2 pb-2.5 text-[12.5px] text-[var(--text-2)]">
-            <input
-              type="checkbox"
-              checked={applyToModel}
-              onChange={(e) => setApplyToModel(e.target.checked)}
-              className="h-4 w-4 accent-[var(--gold)]"
-            />
-            Apply best config as new model
-          </label>
-          <Button onClick={run} loading={busy}>
-            <Play size={15} /> Run optimizer
-          </Button>
-          <p className="w-full text-[11.5px] text-[var(--text-3)]">
-            Latest {label} draw: <span className="mono text-[var(--text-2)]">{latestDrawDate ?? '—'}</span> · the
-            validation window must end before it.
-          </p>
+
+        {preflight.loading ? (
+          <Spinner label="Checking available history…" />
+        ) : preflight.error ? (
+          <div className="px-5 pb-5 text-[12.5px] text-[#ffc0b8]">{preflight.error}</div>
+        ) : (
+          <div className="space-y-4 p-5">
+            <div className="grid gap-4 sm:grid-cols-3">
+              <StatCard
+                label="Automatic validation"
+                value={<span className="text-[17px]">{windowLabel(window)}</span>}
+                hint={window ? `~${window.monthsCovered} months` : undefined}
+                tone="violet"
+              />
+              <StatCard
+                label="Validation draws"
+                value={window?.validationDrawCount ?? '—'}
+                hint={
+                  window
+                    ? window.usedLargestAvailableWindow
+                      ? 'Largest available window'
+                      : 'Most recent ~12 months'
+                    : undefined
+                }
+                tone="sky"
+              />
+              <StatCard
+                label={`Latest ${label} draw`}
+                value={<span className="text-[17px]">{formatIsoDate(window?.latestDrawDate)}</span>}
+                hint="Reserved as the next prediction reference"
+                tone="gold"
+              />
+            </div>
+
+            <p className="text-[12px] text-[var(--text-3)]">
+              Validation ends before the latest draw, so no future draw is ever used and the predicted draw is excluded
+              from its own evaluation. Training history before the window:{' '}
+              <span className="mono text-[var(--text-2)]">{window?.trainingDrawsBeforeWindow ?? '—'}</span> draws.
+            </p>
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              {(preflight.data?.checks ?? []).map((check) => (
+                <div key={check.name} className="flex items-start gap-2.5 rounded-lg bg-[var(--surface-2)] px-3 py-2.5">
+                  {check.ok ? (
+                    <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-[var(--mint)]" />
+                  ) : (
+                    <TriangleAlert
+                      size={15}
+                      className={`mt-0.5 shrink-0 ${check.critical ? 'text-[var(--coral)]' : 'text-[var(--gold)]'}`}
+                    />
+                  )}
+                  <div className="min-w-0">
+                    <p className="text-[12.5px] font-medium text-[var(--text)]">{check.name}</p>
+                    <p className="text-[11.5px] text-[var(--text-3)]">{check.detail}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {/* Run controls -------------------------------------------------------- */}
+      <Card>
+        <PanelHeader
+          title="Run Auto Optimization"
+          subtitle={`Optimizing the ${label} model only — Lunchtime and Teatime stay independent`}
+          right={<Wand2 size={16} className="text-[var(--gold)]" />}
+        />
+        <div className="space-y-4 p-5">
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={runAuto} loading={busy} disabled={isLive || preflight.data?.ready === false} size="lg">
+              <Play size={15} /> Run Auto Optimization
+            </Button>
+            {isLive && job ? (
+              <Button variant="secondary" onClick={cancel} loading={busy}>
+                <Square size={14} /> Cancel run #{job.runId}
+              </Button>
+            ) : null}
+            <Button variant="ghost" onClick={() => setAdvanced((v) => !v)}>
+              {advanced ? 'Hide advanced options' : 'Advanced options'}
+            </Button>
+            <p className="text-[11.5px] text-[var(--text-3)]">
+              Validation window is chosen automatically. Numbers below are the existing predictor's metrics.
+            </p>
+          </div>
+
+          {advanced ? (
+            <div className="grid gap-4 rounded-lg bg-[var(--surface-2)] p-4 sm:grid-cols-2">
+              <Field label="Configurations per search phase" hint="Random-search population (unchanged strategy)">
+                <Input
+                  type="number"
+                  min={10}
+                  max={1000}
+                  value={populationSize}
+                  onChange={(e) => setPopulationSize(Number(e.target.value))}
+                  disabled={isLive}
+                />
+              </Field>
+
+              <label className="flex items-center gap-2 self-end pb-2.5 text-[12.5px] text-[var(--text-2)]">
+                <input
+                  type="checkbox"
+                  checked={customWindow}
+                  onChange={(e) => setCustomWindow(e.target.checked)}
+                  disabled={isLive}
+                  className="h-4 w-4 accent-[var(--gold)]"
+                />
+                Use custom validation dates
+              </label>
+
+              {customWindow ? (
+                <>
+                  <Field label="Validation start">
+                    <Input
+                      type="date"
+                      value={customStart}
+                      onChange={(e) => setCustomStart(e.target.value)}
+                      disabled={isLive}
+                    />
+                  </Field>
+                  <Field label="Validation end" hint={`Must be before ${formatIsoDate(window?.latestDrawDate)}`}>
+                    <Input
+                      type="date"
+                      value={customEnd}
+                      onChange={(e) => setCustomEnd(e.target.value)}
+                      disabled={isLive}
+                    />
+                  </Field>
+                </>
+              ) : null}
+
+              <label className="flex items-center gap-2 text-[12.5px] text-[var(--text-2)]">
+                <input
+                  type="checkbox"
+                  checked={applyToModel}
+                  onChange={(e) => setApplyToModel(e.target.checked)}
+                  disabled={isLive}
+                  className="h-4 w-4 accent-[var(--gold)]"
+                />
+                Apply best config as new model when the run completes
+              </label>
+            </div>
+          ) : null}
         </div>
       </Card>
 
+      {/* Live progress / result --------------------------------------------- */}
+      {job ? (
+        <Card>
+          <PanelHeader
+            title={`Run #${job.runId} — ${label} model`}
+            subtitle={
+              job.validationStartDate && job.validationEndDate
+                ? `Validation: ${formatIsoDate(job.validationStartDate)} → ${formatIsoDate(job.validationEndDate)}${
+                    job.autoWindow ? ' (automatic)' : ' (custom)'
+                  }`
+                : undefined
+            }
+            right={<Badge tone={statusTone(job.status)}>{job.status}</Badge>}
+          />
+
+          <div className="space-y-5 p-5">
+            {isLive ? (
+              <>
+                <div className="space-y-2">
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-[12.5px] text-[var(--text-2)]">
+                      Progress: <span className="mono text-[var(--text)]">{job.configsTested}</span> /{' '}
+                      <span className="mono">{totalConfigs}</span> configurations
+                    </span>
+                    <span className="text-[11.5px] text-[var(--text-3)]">
+                      {job.phase === 'hill-climbing' ? 'Hill-climbing phase' : 'Random-search phase'}
+                    </span>
+                  </div>
+                  <ProgressBar value={testedRatio} tone="violet" />
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <StatCard label="Validation draws" value={job.validationDrawCount ?? '—'} tone="sky" />
+                  <StatCard label="Configurations tested" value={job.configsTested} tone="violet" />
+                  <StatCard label="Configurations failed" value={job.configsFailed} tone="coral" />
+                  <StatCard label="Elapsed" value={formatDuration(job.elapsedMs)} tone="gold" />
+                  <StatCard
+                    label="Current best avg hits"
+                    value={job.bestAvgHits != null ? job.bestAvgHits.toFixed(2) : '—'}
+                    tone="mint"
+                  />
+                  <StatCard label="Current best 4-hit rate" value={percent(job.best4HitRate)} tone="gold" />
+                  <StatCard
+                    label="Current configuration"
+                    value={
+                      job.currentConfig ? (
+                        <span className="text-[15px]">lookback {job.currentConfig.lookbackWindow}</span>
+                      ) : (
+                        '—'
+                      )
+                    }
+                    hint={job.currentConfig ? `iteration ${job.currentIteration}` : undefined}
+                    tone="sky"
+                  />
+                  <StatCard
+                    label="Started"
+                    value={<span className="text-[15px]">{formatDateTime(job.startedAt)}</span>}
+                    tone="violet"
+                  />
+                </div>
+              </>
+            ) : null}
+
+            {job.status === 'failed' ? (
+              <div className="rounded-lg border border-[var(--coral)]/40 bg-[var(--coral)]/10 px-4 py-3 text-[12.5px] text-[#ffc0b8]">
+                <p className="font-medium">Optimization failed — no performance figures were produced.</p>
+                <p className="mt-1">{job.errorMessage ?? 'The run stopped without a result.'}</p>
+              </div>
+            ) : null}
+
+            {job.status === 'cancelled' ? (
+              <div className="rounded-lg border border-[var(--line-2)] bg-[var(--surface-2)] px-4 py-3 text-[12.5px] text-[var(--text-2)]">
+                Run cancelled after {job.configsTested} configuration(s). Nothing was applied.
+              </div>
+            ) : null}
+
+            {job.status === 'completed' ? (
+              <div className="space-y-4">
+                <div className="rounded-lg border border-[var(--mint)]/40 bg-[var(--mint)]/10 px-4 py-3 text-[12.5px] text-[#9ff0d0]">
+                  Optimization completed
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <StatCard label="Draw type" value={<span className="text-[17px]">{label}</span>} tone="violet" />
+                  <StatCard
+                    label="Validation"
+                    value={<span className="text-[15px]">{windowLabel(jobToWindow(job))}</span>}
+                    tone="sky"
+                  />
+                  <StatCard label="Validation draws" value={job.validationDrawCount ?? '—'} tone="sky" />
+                  <StatCard label="Configurations tested" value={job.configsTested} tone="mint" />
+                  <StatCard label="Configurations failed" value={job.configsFailed} tone="coral" />
+                  <StatCard
+                    label="Best average hits"
+                    value={job.bestAvgHits != null ? job.bestAvgHits.toFixed(2) : '—'}
+                    tone="mint"
+                  />
+                  <StatCard label="Best 4-hit rate" value={percent(job.best4HitRate)} tone="gold" />
+                  <StatCard label="Elapsed" value={formatDuration(job.elapsedMs)} tone="violet" />
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button variant="secondary" onClick={applyBest} loading={applying}>
+                    Apply best config as new model
+                  </Button>
+                  <p className="text-[11.5px] text-[var(--text-3)]">
+                    Applying only creates a new active {label} model — the prediction algorithm itself is unchanged.
+                  </p>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </Card>
+      ) : null}
+
+      {/* Pipeline diagnostic -------------------------------------------------- */}
+      <Card>
+        <PanelHeader
+          title="Pipeline diagnostic"
+          subtitle="Proves history → existing predictor → prediction → actual draw → existing scoring works (small sample)"
+          right={<Activity size={16} className="text-[var(--sky)]" />}
+        />
+        <div className="space-y-4 p-5">
+          <div className="flex flex-wrap items-center gap-3">
+            <Button variant="secondary" onClick={runDiagnostic} loading={diagnosing}>
+              Run diagnostic (10 draws)
+            </Button>
+            <p className="text-[11.5px] text-[var(--text-3)]">
+              Uses the same automatic validation window and the default model configuration.
+            </p>
+          </div>
+
+          {diagnosticError ? (
+            <div className="rounded-lg border border-[var(--coral)]/40 bg-[var(--coral)]/10 px-4 py-3 text-[12.5px] text-[#ffc0b8]">
+              {diagnosticError}
+            </div>
+          ) : null}
+
+          {diagnostic ? (
+            <div className="space-y-4">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <StatCard label="Validation draws" value={diagnostic.validationDrawCount} tone="sky" />
+                <StatCard label="Predictions generated" value={diagnostic.predictionsGenerated} tone="mint" />
+                <StatCard label="Predictions failed" value={diagnostic.predictionsFailed} tone="coral" />
+                <StatCard label="Avg hits" value={diagnostic.avgHits.toFixed(2)} tone="gold" />
+              </div>
+
+              {diagnostic.structureIssues.length > 0 ? (
+                <div className="rounded-lg border border-[var(--coral)]/40 bg-[var(--coral)]/10 px-4 py-3 text-[12px] text-[#ffc0b8]">
+                  <p className="font-medium">Structure issues detected</p>
+                  <ul className="mt-1 list-disc pl-4">
+                    {diagnostic.structureIssues.slice(0, 8).map((issue) => (
+                      <li key={issue}>{issue}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-[var(--mint)]/40 bg-[var(--mint)]/10 px-4 py-3 text-[12.5px] text-[#9ff0d0]">
+                  Prediction and actual-draw structures are valid and the recorded hit counts match a direct comparison.
+                </div>
+              )}
+
+              {diagnostic.failures.length > 0 ? (
+                <div className="rounded-lg border border-[var(--gold)]/40 bg-[var(--gold)]/10 px-4 py-3 text-[12px] text-[var(--text-2)]">
+                  <p className="font-medium">Skipped evaluations</p>
+                  <ul className="mt-1 list-disc pl-4">
+                    {diagnostic.failures.slice(0, 8).map((failure) => (
+                      <li key={failure.date}>
+                        {formatIsoDate(failure.date)} — {failure.reason}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+
+              <div className="overflow-x-auto">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Validation draw</th>
+                      <th>Training draws</th>
+                      <th>Predicted</th>
+                      <th>Actual</th>
+                      <th>Hits</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {diagnostic.rows.map((row) => (
+                      <tr key={row.validationDrawDate}>
+                        <td className="strong">{formatIsoDate(row.validationDrawDate)}</td>
+                        <td className="mono">{row.trainingDrawCount}</td>
+                        <td className="mono">{[...row.predictedMain, row.predictedBooster].join(' · ')}</td>
+                        <td className="mono">{[...row.actualMain, row.actualBooster].join(' · ')}</td>
+                        <td className="mono">{row.mainHits}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </Card>
+
+      {/* History -------------------------------------------------------------- */}
       <Card className="overflow-hidden">
-        <PanelHeader title="Optimization history" subtitle="Most recent first" right={<FlaskConical size={16} className="text-[var(--text-3)]" />} />
+        <PanelHeader
+          title={`${label} optimization history`}
+          subtitle="Most recent first — failed runs are never counted as zero-performance configurations"
+          right={<FlaskConical size={16} className="text-[var(--text-3)]" />}
+        />
         {history.loading ? (
           <Spinner />
         ) : runs.length === 0 ? (
-          <EmptyState title="No optimizer runs yet" description="Run the optimizer to search for better weights." />
+          <EmptyState title="No optimizer runs yet" description="Run auto optimization to search for better weights." />
         ) : (
           <div className="overflow-x-auto">
             <table className="table">
               <thead>
                 <tr>
-                  <th>Completed</th>
+                  <th>Started</th>
                   <th>Status</th>
                   <th>Configs tested</th>
+                  <th>Configs failed</th>
                   <th>Validation window</th>
+                  <th>Draws</th>
                   <th>Best avg hits</th>
                   <th>Best 4-hit</th>
                 </tr>
@@ -184,18 +662,29 @@ export default function AdminOptimizer() {
               <tbody>
                 {runs.map((run) => (
                   <tr key={run.id}>
-                    <td className="strong">{formatDate(run.completedAt)}</td>
+                    <td className="strong">{formatDateTime(run.startedAt ?? run.completedAt)}</td>
                     <td>
-                      <Badge tone={run.status === 'completed' ? 'mint' : 'neutral'}>{run.status}</Badge>
+                      <Badge tone={statusTone(run.status as OptimizerJobStatus)}>{run.status}</Badge>
+                      {run.errorMessage && run.status === 'failed' ? (
+                        <p className="mt-1 max-w-[240px] text-[11px] text-[var(--text-3)]">{run.errorMessage}</p>
+                      ) : null}
                     </td>
                     <td className="mono">{run.configsTested}</td>
+                    <td className="mono">{run.configsFailed ?? 0}</td>
                     <td className="text-[11.5px]">
-                      {formatDate(run.validationPeriod.startDate)} → {formatDate(run.validationPeriod.endDate)}
+                      {formatIsoDate(run.validationPeriod.startDate)} → {formatIsoDate(run.validationPeriod.endDate)}
+                    </td>
+                    <td className="mono">{run.validationDrawCount ?? '—'}</td>
+                    <td className="mono">
+                      {run.status === 'completed' && run.bestMetrics.avgHits != null
+                        ? run.bestMetrics.avgHits.toFixed(2)
+                        : '—'}
                     </td>
                     <td className="mono">
-                      {run.bestMetrics.avgHits != null ? run.bestMetrics.avgHits.toFixed(2) : '—'}
+                      {run.status === 'completed' && run.bestMetrics.fourHitRate != null
+                        ? percent(run.bestMetrics.fourHitRate)
+                        : '—'}
                     </td>
-                    <td className="mono">{percent(run.bestMetrics.fourHitRate)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -205,4 +694,22 @@ export default function AdminOptimizer() {
       </Card>
     </div>
   );
+}
+
+/** Rebuilds a window-shaped object from a job for label rendering. */
+function jobToWindow(job: OptimizerJobState): OptimizerWindow | null {
+  if (!job.validationStartDate || !job.validationEndDate) return null;
+  return {
+    drawType: job.drawType,
+    earliestDrawDate: job.validationStartDate,
+    latestDrawDate: job.validationEndDate,
+    referenceDrawDate: job.validationEndDate,
+    totalDraws: 0,
+    trainingDrawsBeforeWindow: 0,
+    validationStartDate: job.validationStartDate,
+    validationEndDate: job.validationEndDate,
+    validationDrawCount: job.validationDrawCount ?? 0,
+    monthsCovered: 0,
+    usedLargestAvailableWindow: false,
+  };
 }

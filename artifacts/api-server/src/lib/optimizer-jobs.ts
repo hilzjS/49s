@@ -1,0 +1,728 @@
+/**
+ * Optimizer job manager.
+ *
+ * The optimizer search itself is unchanged (see optimizer-engine.ts). This
+ * module only owns the *lifecycle* around a run:
+ *
+ *  - runs the search in a worker thread so the API server stays responsive and
+ *    a long run cannot be killed by an HTTP timeout;
+ *  - tracks real progress (configurations actually evaluated) in memory and
+ *    mirrors it to uk49s_optimizer_runs for durability;
+ *  - guarantees a terminal state (completed / failed / cancelled) and never
+ *    leaves a job stuck at "running";
+ *  - refuses duplicate runs for the same draw type unless explicitly allowed.
+ *
+ * A failed evaluation is reported as a failure — never as a zero-performance
+ * configuration.
+ */
+import { Worker } from "node:worker_threads";
+import { db } from "@workspace/db";
+import {
+  uk49sOptimizerRuns,
+  uk49sOptimizerConfigs,
+  type DiversityConstraints,
+  type DrawType,
+  type FeatureWeights,
+  type OptimizerConfig,
+  type OptimizerResult,
+  type Uk49sDraw,
+} from "@workspace/db/schema";
+import { and, eq, inArray } from "drizzle-orm";
+import { logger } from "./logger";
+import { updateActiveModel } from "./prediction-service";
+import type { OptimizerWorkerInput, OptimizerWorkerMessage } from "./optimizer-protocol";
+
+/** `new URL` resolves next to the bundled server (dist/optimizer-worker.mjs). */
+const WORKER_URL = new URL("./optimizer-worker.mjs", import.meta.url);
+
+export type OptimizerJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+/** Configurations are stored up to this many per run (unchanged behaviour). */
+const MAX_STORED_CONFIGS = 500;
+/** How often progress is mirrored to the database (ms). */
+const PERSIST_INTERVAL_MS = 1000;
+/** If no progress message arrives for this long, the job is considered hung. */
+export const JOB_STALL_TIMEOUT_MS = 15 * 60 * 1000;
+
+export interface OptimizerJobConfig {
+  lookbackWindow: number;
+  weights: FeatureWeights;
+  constraints: DiversityConstraints;
+}
+
+export interface OptimizerJobPublicState {
+  runId: number;
+  drawType: DrawType;
+  status: OptimizerJobStatus;
+  startedAt: string;
+  finishedAt: string | null;
+  elapsedMs: number;
+  totalConfigs: number;
+  configsTested: number;
+  configsFailed: number;
+  currentIteration: number;
+  phase: string | null;
+  best4HitRate: number | null;
+  bestAvgHits: number | null;
+  bestScore: number | null;
+  currentConfig: OptimizerJobConfig | null;
+  errorMessage: string | null;
+  validationStartDate: string | null;
+  validationEndDate: string | null;
+  validationDrawCount: number | null;
+  autoWindow: boolean;
+  hasResult: boolean;
+}
+
+interface OptimizerJob {
+  runId: number;
+  drawType: DrawType;
+  status: OptimizerJobStatus;
+  startedAt: number;
+  finishedAt: number | null;
+  totalConfigs: number;
+  configsTested: number;
+  configsFailed: number;
+  currentIteration: number;
+  phase: string | null;
+  best4HitRate: number | null;
+  bestAvgHits: number | null;
+  bestScore: number | null;
+  currentConfig: OptimizerJobConfig | null;
+  errorMessage: string | null;
+  validationStartDate: string | null;
+  validationEndDate: string | null;
+  validationDrawCount: number | null;
+  autoWindow: boolean;
+  result: OptimizerResult | null;
+    /**
+     * Number of evaluated configurations, counted from the worker's progress
+     * messages. The engine restarts its own iteration counter for each elite
+     * configuration in the hill-climbing phase, so its value is not a running
+     * total and must not be used for progress.
+     */
+    evaluations: number;
+      worker: Worker | null;
+      /**
+       * Set synchronously as soon as the worker reports a terminal message. The
+       * worker exits immediately after posting its result, so the `exit` handler
+       * must not treat that as a crash — the async finalize/DB write is still
+       * running at that point.
+       */
+      settled: boolean;
+      cancelRequested: boolean;
+    lastProgressAt: number;
+    lastPersistAt: number;
+    /** Mirrors the existing explicit `applyToModel` request flag. */
+    applyOnComplete: boolean;
+    minValidationSamples: number;
+  }
+
+const jobs = new Map<number, OptimizerJob>();
+
+export class OptimizerJobError extends Error {
+  readonly statusCode: number;
+  readonly code: string;
+
+  constructor(message: string, statusCode = 400, code = "optimizer_job_error") {
+    super(message);
+    this.name = "OptimizerJobError";
+    this.statusCode = statusCode;
+    this.code = code;
+  }
+}
+
+function toPublic(job: OptimizerJob, includeResult = false): OptimizerJobPublicState & { result?: OptimizerResult } {
+  const state: OptimizerJobPublicState = {
+    runId: job.runId,
+    drawType: job.drawType,
+    status: job.status,
+    startedAt: new Date(job.startedAt).toISOString(),
+    finishedAt: job.finishedAt ? new Date(job.finishedAt).toISOString() : null,
+    elapsedMs: (job.finishedAt ?? Date.now()) - job.startedAt,
+    totalConfigs: job.totalConfigs,
+    configsTested: job.configsTested,
+    configsFailed: job.configsFailed,
+    currentIteration: job.currentIteration,
+    phase: job.phase,
+    best4HitRate: job.best4HitRate,
+    bestAvgHits: job.bestAvgHits,
+    bestScore: job.bestScore,
+    currentConfig: job.currentConfig,
+    errorMessage: job.errorMessage,
+    validationStartDate: job.validationStartDate,
+    validationEndDate: job.validationEndDate,
+    validationDrawCount: job.validationDrawCount,
+    autoWindow: job.autoWindow,
+    hasResult: job.result !== null,
+  };
+
+  return includeResult ? { ...state, result: job.result ?? undefined } : state;
+}
+
+export function getJobState(runId: number, includeResult = false): (OptimizerJobPublicState & { result?: OptimizerResult }) | null {
+  const job = jobs.get(runId);
+  return job ? toPublic(job, includeResult) : null;
+}
+
+export function getActiveJobForDrawType(drawType: DrawType): OptimizerJobPublicState | null {
+  for (const job of jobs.values()) {
+    if (job.drawType === drawType && (job.status === "queued" || job.status === "running")) {
+      return toPublic(job);
+    }
+  }
+  return null;
+}
+
+/** Marks a run as failed, in memory (when present) and in the database. */
+async function markRunFailed(runId: number, message: string): Promise<void> {
+  const job = jobs.get(runId);
+  if (job) {
+    job.status = "failed";
+    job.errorMessage = message;
+    job.finishedAt ??= Date.now();
+    job.worker = null;
+  }
+
+  try {
+    await db
+      .update(uk49sOptimizerRuns)
+      .set({
+        status: "failed",
+        errorMessage: message,
+        completedAt: new Date(),
+        heartbeatAt: new Date(),
+      })
+      .where(eq(uk49sOptimizerRuns.id, runId));
+  } catch (error) {
+    logger.error({ error, runId }, "Failed to persist optimizer failure state");
+  }
+}
+
+async function persistProgress(job: OptimizerJob, force = false): Promise<void> {
+  const now = Date.now();
+  if (!force && now - job.lastPersistAt < PERSIST_INTERVAL_MS) return;
+  job.lastPersistAt = now;
+
+  try {
+    await db
+      .update(uk49sOptimizerRuns)
+      .set({
+        status: job.status === "queued" ? "queued" : "running",
+        configsTested: job.configsTested,
+        configsFailed: job.configsFailed,
+        currentIteration: job.currentIteration,
+        best4HitRate: job.best4HitRate,
+        bestAvgHits: job.bestAvgHits,
+        heartbeatAt: new Date(),
+      })
+      .where(eq(uk49sOptimizerRuns.id, job.runId));
+  } catch (error) {
+    logger.error({ error, runId: job.runId }, "Failed to persist optimizer progress");
+  }
+}
+
+/**
+ * Splits the optimizer output into successfully evaluated configurations and
+ * evaluation failures. A configuration whose validation produced no
+ * predictions was never actually evaluated — it is a failure, not a 0%.
+ */
+function partitionResults(result: OptimizerResult): {
+  evaluated: OptimizerResult["allResults"];
+  failedCount: number;
+} {
+  const evaluated = result.allResults.filter((config) => config.validationSampleSize > 0);
+  return { evaluated, failedCount: result.allResults.length - evaluated.length };
+}
+
+async function storeConfigurationResults(runId: number, drawType: DrawType, result: OptimizerResult): Promise<void> {
+  const rows = result.allResults.slice(0, MAX_STORED_CONFIGS).map((config) => ({
+    runId,
+    drawType,
+    weightFrequency: config.weights.weightFrequency,
+    weightRecency: config.weights.weightRecency,
+    weightHotCold: config.weights.weightHotCold,
+    weightGapAnalysis: config.weights.weightGapAnalysis,
+    weightPairs: config.weights.weightPairs,
+    weightTriples: config.weights.weightTriples,
+    weightConsecutive: config.weights.weightConsecutive,
+    weightOddEven: config.weights.weightOddEven,
+    weightLowHigh: config.weights.weightLowHigh,
+    weightSumRange: config.weights.weightSumRange,
+    weightPositional: config.weights.weightPositional,
+    weightRepeat: config.weights.weightRepeat,
+    weightFirst3Minus2: config.weights.weightFirst3Minus2,
+    lookbackWindow: config.lookbackWindow,
+    enforceDiversity: config.constraints.enforceDiversity,
+    minNumberSpread: config.constraints.minNumberSpread,
+    maxSameGroup: config.constraints.maxSameGroup,
+    validation4HitRate: config.validation4HitRate,
+    validationAvgHits: config.validationAvgHits,
+    validationSampleSize: config.validationSampleSize,
+    validationBoosterHitRate: config.validationBoosterHitRate,
+    stabilityScore: config.stabilityScore,
+    randomSeed: config.randomSeed,
+  }));
+
+  if (rows.length === 0) return;
+
+  try {
+    await db.insert(uk49sOptimizerConfigs).values(rows);
+  } catch (error) {
+    logger.error({ error, runId }, "Failed to store optimizer configuration results");
+    throw error;
+  }
+}
+
+async function finalizeSuccess(job: OptimizerJob, result: OptimizerResult): Promise<void> {
+  const { evaluated, failedCount } = partitionResults(result);
+
+  job.result = result;
+  job.configsTested = evaluated.length;
+  job.configsFailed = failedCount;
+  job.best4HitRate = result.validationResult.totalPredictions > 0 ? result.validationResult.fourHitRate : null;
+  job.bestAvgHits = result.validationResult.totalPredictions > 0 ? result.validationResult.avgMainHits : null;
+
+  /**
+   * No configuration produced a single validation prediction: the pipeline
+   * never really ran. Reporting this as a completed run with 0.00 / 0% would be
+   * a fabricated result, so the run is failed with an explicit reason.
+   */
+  if (evaluated.length === 0 || result.validationResult.totalPredictions === 0) {
+    job.status = "failed";
+    job.errorMessage =
+      `No configuration could be evaluated: 0 validation predictions were produced for the window ` +
+      `${job.validationStartDate} → ${job.validationEndDate}. The validation period contains no eligible draws ` +
+      `or none has enough preceding history for a lookback window.`;
+    job.finishedAt = Date.now();
+    job.worker = null;
+    await persistProgress(job, true);
+    await markRunFailed(job.runId, job.errorMessage);
+    return;
+  }
+
+  try {
+    await storeConfigurationResults(job.runId, job.drawType, result);
+
+    await db
+      .update(uk49sOptimizerRuns)
+      .set({
+        status: "completed",
+        configsTested: job.configsTested,
+        configsFailed: job.configsFailed,
+        currentIteration: job.currentIteration,
+        best4HitRate: job.best4HitRate,
+        bestAvgHits: job.bestAvgHits,
+        validationDrawCount: job.validationDrawCount,
+        errorMessage: null,
+        completedAt: new Date(),
+        heartbeatAt: new Date(),
+      })
+      .where(eq(uk49sOptimizerRuns.id, job.runId));
+      
+          job.status = "completed";
+          job.finishedAt = Date.now();
+          job.worker = null;
+      
+          if (job.applyOnComplete && result.validationResult.totalPredictions >= job.minValidationSamples) {
+            try {
+              await updateActiveModel(
+                job.drawType,
+                result.bestWeights,
+                result.bestLookbackWindow,
+                result.bestConstraints,
+                result.validationResult.fourHitRate,
+                result.validationResult.avgMainHits,
+                result.validationResult.totalPredictions,
+              );
+              logger.info({ runId: job.runId, drawType: job.drawType }, "Applied best optimizer configuration as active model");
+            } catch (error) {
+              logger.error({ error, runId: job.runId }, "Failed to apply best optimizer configuration");
+            }
+          }
+        } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to store optimizer results";
+    job.status = "failed";
+    job.errorMessage = message;
+    job.finishedAt = Date.now();
+    job.worker = null;
+    await markRunFailed(job.runId, message);
+  }
+}
+
+export interface StartOptimizerJobParams {
+  drawType: DrawType;
+  draws: Uk49sDraw[];
+  optimizerConfig: OptimizerConfig;
+  validationDrawCount: number;
+    autoWindow: boolean;
+    /** Explicitly allow a second concurrent run for the same draw type. */
+    allowDuplicate?: boolean;
+    /**
+     * Existing behaviour: when the request explicitly asks for it, the best
+     * configuration is applied as the active model once the run completes. Never
+     * applied automatically otherwise.
+     */
+    applyOnComplete?: boolean;
+  }
+
+/**
+ * Creates the run record and starts the optimizer worker.
+ *
+ * Throws OptimizerJobError(409) when an equivalent job is already queued or
+ * running, so duplicate optimizer jobs cannot be started by accident.
+ */
+export async function startOptimizerJob(params: StartOptimizerJobParams): Promise<OptimizerJobPublicState> {
+  const { drawType, draws, optimizerConfig, validationDrawCount, autoWindow } = params;
+
+  const inMemory = getActiveJobForDrawType(drawType);
+
+  const runningRows = await db
+    .select({ id: uk49sOptimizerRuns.id, status: uk49sOptimizerRuns.status })
+    .from(uk49sOptimizerRuns)
+    .where(and(eq(uk49sOptimizerRuns.drawType, drawType), inArray(uk49sOptimizerRuns.status, ["queued", "running"])));
+
+  if (!params.allowDuplicate && (inMemory || runningRows.length > 0)) {
+    const existingId = inMemory?.runId ?? runningRows[0]?.id;
+    throw new OptimizerJobError(
+      `An optimizer run for ${drawType} is already in progress (run #${existingId}). Wait for it to finish or cancel it first.`,
+      409,
+      "optimizer_job_conflict",
+    );
+  }
+
+  const totalConfigs = optimizerConfig.populationSize + optimizerConfig.eliteSize * 50;
+
+  const [run] = await db
+    .insert(uk49sOptimizerRuns)
+    .values({
+      drawType,
+      status: "queued",
+      maxIterations: optimizerConfig.maxIterations,
+      populationSize: optimizerConfig.populationSize,
+      eliteSize: optimizerConfig.eliteSize,
+      mutationRate: optimizerConfig.mutationRate,
+      trainStartDate: optimizerConfig.trainStartDate || null,
+      trainEndDate: optimizerConfig.trainEndDate || null,
+      validationStartDate: optimizerConfig.validationStartDate,
+      validationEndDate: optimizerConfig.validationEndDate,
+      testStartDate: optimizerConfig.testStartDate ?? null,
+      testEndDate: optimizerConfig.testEndDate ?? null,
+      configsTested: 0,
+      configsFailed: 0,
+      totalConfigs,
+      validationDrawCount,
+      currentIteration: 0,
+      autoWindow,
+      startedAt: new Date(),
+      heartbeatAt: new Date(),
+    })
+    .returning();
+
+  const job: OptimizerJob = {
+    runId: run.id,
+    drawType,
+    status: "queued",
+    startedAt: Date.now(),
+    finishedAt: null,
+    totalConfigs,
+    configsTested: 0,
+    configsFailed: 0,
+    currentIteration: 0,
+    phase: null,
+    best4HitRate: null,
+    bestAvgHits: null,
+    bestScore: null,
+    currentConfig: null,
+    errorMessage: null,
+    validationStartDate: optimizerConfig.validationStartDate,
+    validationEndDate: optimizerConfig.validationEndDate,
+    validationDrawCount,
+    autoWindow,
+    result: null,
+    evaluations: 0,
+    worker: null,
+    settled: false,
+    cancelRequested: false,
+    lastProgressAt: Date.now(),
+    lastPersistAt: 0,
+    applyOnComplete: params.applyOnComplete === true,
+    minValidationSamples: optimizerConfig.minValidationSamples,
+  };
+
+  // Bound the in-memory registry; finished jobs are always recoverable from the
+  // database, so only the oldest terminal entries are evicted.
+  const finished = [...jobs.entries()].filter(
+    ([, entry]) => entry.status !== "running" && entry.status !== "queued",
+  );
+  for (const [id] of finished.slice(0, Math.max(0, finished.length - 20))) {
+    jobs.delete(id);
+  }
+
+  jobs.set(run.id, job);
+
+  const workerData: OptimizerWorkerInput = { draws, optimizerConfig };
+
+  let worker: Worker;
+  try {
+    worker = new Worker(WORKER_URL, { workerData });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to start optimizer worker";
+    await markRunFailed(run.id, message);
+    throw new OptimizerJobError(message, 500, "optimizer_worker_start_failed");
+  }
+
+  job.worker = worker;
+  job.status = "running";
+  job.lastProgressAt = Date.now();
+  await persistProgress(job, true);
+
+  logger.info(
+    {
+      runId: run.id,
+      drawType,
+      populationSize: optimizerConfig.populationSize,
+      eliteSize: optimizerConfig.eliteSize,
+      validationStartDate: optimizerConfig.validationStartDate,
+      validationEndDate: optimizerConfig.validationEndDate,
+      validationDrawCount,
+      totalConfigs,
+      autoWindow,
+    },
+    "Optimizer job started",
+  );
+
+  worker.on("message", (message: OptimizerWorkerMessage) => {
+    // Terminal messages are flagged synchronously so the worker's imminent
+    // "exit" is not mistaken for a crash while the result is being stored.
+    if (message.type === "done" || message.type === "error") {
+      if (job.settled) return;
+      job.settled = true;
+    }
+    void handleWorkerMessage(job, message);
+  });
+
+  worker.on("error", (error: Error) => {
+    logger.error({ error, runId: job.runId }, "Optimizer worker error");
+    void markRunFailed(job.runId, `Optimizer worker error: ${error.message}`);
+  });
+
+  worker.on("exit", (code) => {
+    // A reported result or an explicit cancellation is not a crash.
+    if (job.settled) return;
+
+    if (job.status !== "queued" && job.status !== "running") return;
+
+    const message = job.cancelRequested
+      ? "Optimizer run cancelled"
+      : `Optimizer worker exited unexpectedly (code ${code}) before reporting a result`;
+
+    if (job.cancelRequested) {
+      job.status = "cancelled";
+      job.finishedAt = Date.now();
+      job.errorMessage = message;
+      job.worker = null;
+      void db
+        .update(uk49sOptimizerRuns)
+        .set({ status: "cancelled", errorMessage: message, completedAt: new Date(), heartbeatAt: new Date() })
+        .where(eq(uk49sOptimizerRuns.id, job.runId))
+        .catch((error: unknown) => logger.error({ error, runId: job.runId }, "Failed to persist cancellation"));
+    } else {
+      void markRunFailed(job.runId, message);
+    }
+  });
+
+  return toPublic(job);
+}
+
+async function handleWorkerMessage(job: OptimizerJob, message: OptimizerWorkerMessage): Promise<void> {
+  if (job.cancelRequested && job.status !== "cancelled") {
+    return;
+  }
+
+  switch (message.type) {
+    case "progress": {
+      job.status = "running";
+      job.currentIteration = message.iteration;
+      job.phase = message.phase;
+      job.bestScore = message.bestScore;
+      job.best4HitRate = message.best4HitRate;
+      job.bestAvgHits = message.bestAvgHits;
+      job.currentConfig = {
+        lookbackWindow: message.currentLookbackWindow,
+        weights: message.currentWeights,
+        constraints: message.currentConstraints,
+      };
+      // Progress is a real count of configurations that have been evaluated —
+      // incremented only for evaluations the worker actually completed.
+      job.evaluations += 1;
+      job.configsTested = job.evaluations;
+      job.lastProgressAt = Date.now();
+            await persistProgress(job);
+      break;
+    }
+    case "done": {
+      await finalizeSuccess(job, message.result);
+      logger.info(
+        {
+          runId: job.runId,
+          configsTested: job.configsTested,
+          configsFailed: job.configsFailed,
+          best4HitRate: job.best4HitRate,
+          bestAvgHits: job.bestAvgHits,
+        },
+        "Optimizer job finished",
+      );
+      break;
+    }
+    case "error": {
+      await markRunFailed(job.runId, message.message);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+/** Requests cancellation; the worker is terminated and the run marked cancelled. */
+export async function cancelOptimizerJob(runId: number): Promise<OptimizerJobPublicState> {
+  const job = jobs.get(runId);
+
+  if (!job) {
+    const rows = await db.select().from(uk49sOptimizerRuns).where(eq(uk49sOptimizerRuns.id, runId)).limit(1);
+    if (rows.length === 0) {
+      throw new OptimizerJobError(`Optimizer run #${runId} was not found`, 404, "optimizer_job_not_found");
+    }
+    if (rows[0].status === "queued" || rows[0].status === "running") {
+      await markRunFailed(runId, "Cancelled by administrator (interrupted run recovered)");
+      return rebuildStateFromRow(runId);
+    }
+    throw new OptimizerJobError(
+      `Optimizer run #${runId} is already ${rows[0].status} and cannot be cancelled`,
+      409,
+      "optimizer_job_not_cancellable",
+    );
+  }
+
+  if (job.status !== "queued" && job.status !== "running") {
+    throw new OptimizerJobError(
+      `Optimizer run #${runId} is already ${job.status} and cannot be cancelled`,
+      409,
+      "optimizer_job_not_cancellable",
+    );
+  }
+
+  job.cancelRequested = true;
+  job.status = "cancelled";
+  job.finishedAt = Date.now();
+  job.errorMessage = "Optimizer run cancelled by administrator";
+
+  if (job.worker) {
+    try {
+      await job.worker.terminate();
+    } catch (error) {
+      logger.warn({ error, runId }, "Failed to terminate optimizer worker");
+    }
+    job.worker = null;
+  }
+
+  await db
+    .update(uk49sOptimizerRuns)
+    .set({
+      status: "cancelled",
+      errorMessage: job.errorMessage,
+      completedAt: new Date(),
+      heartbeatAt: new Date(),
+      configsTested: job.configsTested,
+      configsFailed: job.configsFailed,
+    })
+    .where(eq(uk49sOptimizerRuns.id, runId));
+
+  logger.info({ runId, configsTested: job.configsTested }, "Optimizer job cancelled");
+
+  return toPublic(job);
+}
+
+async function rebuildStateFromRow(runId: number): Promise<OptimizerJobPublicState> {
+  const rows = await db.select().from(uk49sOptimizerRuns).where(eq(uk49sOptimizerRuns.id, runId)).limit(1);
+  const row = rows[0];
+
+  return {
+    runId,
+    drawType: row.drawType,
+    status: row.status as OptimizerJobStatus,
+    startedAt: row.startedAt.toISOString(),
+    finishedAt: row.completedAt ? row.completedAt.toISOString() : null,
+    elapsedMs: (row.completedAt ?? new Date()).getTime() - row.startedAt.getTime(),
+    totalConfigs: row.totalConfigs ?? 0,
+    configsTested: row.configsTested,
+    configsFailed: row.configsFailed,
+    currentIteration: row.currentIteration,
+    phase: null,
+    best4HitRate: row.best4HitRate,
+    bestAvgHits: row.bestAvgHits,
+    bestScore: null,
+    currentConfig: null,
+    errorMessage: row.errorMessage,
+    validationStartDate: row.validationStartDate,
+    validationEndDate: row.validationEndDate,
+    validationDrawCount: row.validationDrawCount,
+    autoWindow: row.autoWindow,
+    hasResult: false,
+  };
+}
+
+/**
+ * Failure/restart recovery: any run left in queued/running with no live worker
+ * is marked failed. Called once at boot and periodically thereafter so a
+ * crashed, timed-out or restarted process can never leave a job permanently
+ * "running".
+ */
+export async function recoverInterruptedJobs(reason: string): Promise<number> {
+  const stale = await db
+    .select({ id: uk49sOptimizerRuns.id })
+    .from(uk49sOptimizerRuns)
+    .where(inArray(uk49sOptimizerRuns.status, ["queued", "running"]));
+
+  let recovered = 0;
+
+  for (const row of stale) {
+    const job = jobs.get(row.id);
+    if (job && (job.status === "queued" || job.status === "running")) {
+      // A result is already being stored — do not interfere.
+      if (job.settled) continue;
+      // A live, healthy worker keeps the job alive.
+      if (job.worker && Date.now() - job.lastProgressAt < JOB_STALL_TIMEOUT_MS) continue;
+      if (job.worker) {
+        try {
+          await job.worker.terminate();
+        } catch {
+          // Ignore — terminating an already-dead worker is harmless.
+        }
+      }
+    }
+
+    await markRunFailed(row.id, reason);
+    recovered += 1;
+  }
+
+  if (recovered > 0) {
+    logger.warn({ recovered, reason }, "Recovered optimizer runs left in a non-terminal state");
+  }
+
+  return recovered;
+}
+
+/** Stops every worker so a clean shutdown does not leave orphan threads. */
+export async function shutdownOptimizerJobs(): Promise<void> {
+  for (const job of jobs.values()) {
+    if (job.worker) {
+      try {
+        await job.worker.terminate();
+      } catch {
+        // Ignore.
+      }
+      job.worker = null;
+    }
+  }
+}

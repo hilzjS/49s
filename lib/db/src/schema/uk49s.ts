@@ -12,7 +12,7 @@ export const validationStatusEnum = pgEnum("validation_status", ["valid", "inval
 export const modelStatusEnum = pgEnum("model_status", ["active", "archived", "training"]);
 
 // Optimizer status enum
-export const optimizerStatusEnum = pgEnum("optimizer_status", ["pending", "running", "completed", "failed"]);
+export const optimizerStatusEnum = pgEnum("optimizer_status", ["pending", "queued", "running", "completed", "failed", "cancelled"]);
 
 // Backtest status enum
 export const backtestStatusEnum = pgEnum("backtest_status", ["pending", "running", "completed", "failed"]);
@@ -171,11 +171,18 @@ export const uk49sOptimizerRuns = pgTable("uk49s_optimizer_runs", {
   testEndDate: text("test_end_date"),
   // Results
   configsTested: integer("configs_tested").notNull().default(0),
+  configsFailed: integer("configs_failed").notNull().default(0),
+  totalConfigs: integer("total_configs"),
+  validationDrawCount: integer("validation_draw_count"),
+  currentIteration: integer("current_iteration").notNull().default(0),
+  autoWindow: boolean("auto_window").notNull().default(false),
+  errorMessage: text("error_message"),
   bestConfigId: integer("best_config_id"),
   best4HitRate: real("best_4hit_rate"),
   bestAvgHits: real("best_avg_hits"),
   // Timestamps
   startedAt: timestamp("started_at").defaultNow().notNull(),
+  heartbeatAt: timestamp("heartbeat_at"),
   completedAt: timestamp("completed_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [

@@ -15,12 +15,17 @@ async function buildAll() {
   await rm(distDir, { recursive: true, force: true });
 
   await esbuild({
-    entryPoints: [path.resolve(artifactDir, "src/index.ts")],
-    platform: "node",
-    bundle: true,
-    format: "esm",
-    outdir: distDir,
-    outExtension: { ".js": ".mjs" },
+      // Two entries: the API server and the optimizer worker thread (spawned at
+      // runtime as ./optimizer-worker.mjs next to the server bundle).
+      entryPoints: [
+        path.resolve(artifactDir, "src/index.ts"),
+        path.resolve(artifactDir, "src/optimizer-worker.ts"),
+      ],
+      platform: "node",
+      bundle: true,
+      format: "esm",
+      outdir: distDir,
+      outExtension: { ".js": ".mjs" },
     logLevel: "info",
     // Some packages may not be bundleable, so we externalize them, we can add more here as needed.
     // Some of the packages below may not be imported or installed, but we're adding them in case they are in the future.

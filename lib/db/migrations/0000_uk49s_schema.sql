@@ -26,9 +26,14 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$ BEGIN
-  CREATE TYPE optimizer_status AS ENUM ('pending', 'running', 'completed', 'failed');
+  CREATE TYPE optimizer_status AS ENUM ('pending', 'queued', 'running', 'completed', 'failed', 'cancelled');
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
+
+-- Additive: widen an existing optimizer_status enum with the job states used by
+-- the optimizer job runner (queued / cancelled).
+ALTER TYPE optimizer_status ADD VALUE IF NOT EXISTS 'queued';
+ALTER TYPE optimizer_status ADD VALUE IF NOT EXISTS 'cancelled';
 
 DO $$ BEGIN
   CREATE TYPE backtest_status AS ENUM ('pending', 'running', 'completed', 'failed');
@@ -125,13 +130,30 @@ CREATE TABLE IF NOT EXISTS uk49s_optimizer_runs (
   test_start_date       text,
   test_end_date         text,
   configs_tested        integer NOT NULL DEFAULT 0,
+  configs_failed        integer NOT NULL DEFAULT 0,
+  total_configs         integer,
+  validation_draw_count integer,
+  current_iteration     integer NOT NULL DEFAULT 0,
+  auto_window           boolean NOT NULL DEFAULT false,
+  error_message         text,
   best_config_id        integer,
   best_4hit_rate        real,
   best_avg_hits         real,
   started_at            timestamp NOT NULL DEFAULT now(),
+  heartbeat_at          timestamp,
   completed_at          timestamp,
   created_at            timestamp NOT NULL DEFAULT now()
 );
+
+-- Additive: job-progress and diagnostic columns for databases created before
+-- the optimizer job runner existed.
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS configs_failed integer NOT NULL DEFAULT 0;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS total_configs integer;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS validation_draw_count integer;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS current_iteration integer NOT NULL DEFAULT 0;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS auto_window boolean NOT NULL DEFAULT false;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS error_message text;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS heartbeat_at timestamp;
 
 CREATE INDEX IF NOT EXISTS uk49s_optimizer_runs_type_status_idx
   ON uk49s_optimizer_runs (draw_type, status);

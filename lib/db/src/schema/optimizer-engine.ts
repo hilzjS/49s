@@ -47,6 +47,25 @@ export interface ConfigurationResult {
   randomSeed: number;
 }
 
+/**
+ * Progress payload emitted after each configuration is evaluated. Reporting
+ * only — the search strategy, scoring and configuration generation are
+ * unchanged.
+ */
+export interface OptimizerProgress {
+  /** Configurations evaluated so far. */
+  iteration: number;
+  bestScore: number;
+  bestResult: ConfigurationResult | null;
+  /** The configuration just evaluated. */
+  current: {
+    weights: FeatureWeights;
+    constraints: DiversityConstraints;
+    lookbackWindow: number;
+  };
+  phase: "random-search" | "hill-climbing";
+}
+
 // Weight ranges for mutation
 const WEIGHT_MIN = 0.0;
 const WEIGHT_MAX = 3.0;
@@ -171,7 +190,7 @@ function evaluateConfig(
 export function optimizeModel(
   draws: Uk49sDraw[],
   optimizerConfig: OptimizerConfig,
-  progressCallback?: (iteration: number, bestScore: number) => void
+  progressCallback?: (progress: OptimizerProgress) => void
 ): OptimizerResult {
   const rng = optimizerConfig.randomSeed
     ? seededRandom(optimizerConfig.randomSeed)
@@ -198,7 +217,13 @@ export function optimizeModel(
       bestResult = result;
     }
     
-    progressCallback?.(i + 1, bestScore);
+    progressCallback?.({
+      iteration: i + 1,
+      bestScore,
+      bestResult,
+      current: config,
+      phase: "random-search",
+    });
   }
   
   // Phase 2: Hill Climbing from best results
@@ -231,7 +256,13 @@ export function optimizeModel(
         Object.assign(eliteConfig, mutated);
       }
       
-      progressCallback?.(optimizerConfig.populationSize + i + 1, bestScore);
+      progressCallback?.({
+        iteration: optimizerConfig.populationSize + i + 1,
+        bestScore,
+        bestResult,
+        current: mutated,
+        phase: "hill-climbing",
+      });
     }
   }
   

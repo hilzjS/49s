@@ -177,12 +177,108 @@ export interface BacktestHistoryItem {
 
 export interface OptimizerRunItem {
   id: number;
+  drawType?: DrawType;
   status: string;
   configsTested: number;
+  configsFailed?: number;
+  totalConfigs?: number | null;
+  validationDrawCount?: number | null;
+  autoWindow?: boolean;
+  errorMessage?: string | null;
   validationPeriod: { startDate: string | null; endDate: string | null };
-  testPeriod: { startDate: string | null; endDate: string | null } | null;
+  testPeriod?: { startDate: string | null; endDate: string | null } | null;
   bestMetrics: { fourHitRate: number | null; avgHits: number | null };
+  startedAt?: string;
   completedAt: string | null;
+}
+
+export interface OptimizerWindow {
+  drawType: DrawType;
+  earliestDrawDate: string;
+  latestDrawDate: string;
+  referenceDrawDate: string;
+  totalDraws: number;
+  trainingDrawsBeforeWindow: number;
+  validationStartDate: string;
+  validationEndDate: string;
+  validationDrawCount: number;
+  monthsCovered: number;
+  usedLargestAvailableWindow: boolean;
+}
+
+export interface OptimizerPreflightCheck {
+  name: string;
+  ok: boolean;
+  critical: boolean;
+  detail: string;
+}
+
+export type OptimizerJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export interface OptimizerJobState {
+  runId: number;
+  drawType: DrawType;
+  status: OptimizerJobStatus;
+  startedAt: string;
+  finishedAt: string | null;
+  elapsedMs: number;
+  totalConfigs: number;
+  configsTested: number;
+  configsFailed: number;
+  currentIteration: number;
+  phase: string | null;
+  best4HitRate: number | null;
+  bestAvgHits: number | null;
+  bestScore: number | null;
+  currentConfig: {
+    lookbackWindow: number;
+    weights: Record<string, number>;
+    constraints: { enforceDiversity: boolean; minNumberSpread: number; maxSameGroup: number };
+  } | null;
+  errorMessage: string | null;
+  validationStartDate: string | null;
+  validationEndDate: string | null;
+  validationDrawCount: number | null;
+  autoWindow: boolean;
+  hasResult: boolean;
+}
+
+export interface OptimizerPreflightResponse {
+  success: boolean;
+  drawType: DrawType;
+  ready: boolean;
+  window: OptimizerWindow;
+  checks: OptimizerPreflightCheck[];
+  activeJob: OptimizerJobState | null;
+  modelLabel: string;
+}
+
+export interface OptimizerDiagnosticRow {
+  validationDrawDate: string;
+  drawType: DrawType;
+  trainingDrawCount: number;
+  trainingCutoff: string;
+  predictedMain: number[];
+  predictedBooster: number;
+  actualMain: number[];
+  actualBooster: number;
+  mainHits: number;
+  boosterHit: boolean;
+}
+
+export interface OptimizerDiagnosticReport {
+  drawType: DrawType;
+  window: OptimizerWindow;
+  sampleRequested: number;
+  validationDrawCount: number;
+  predictionsGenerated: number;
+  predictionsFailed: number;
+  failures: { date: string; reason: string }[];
+  structureIssues: string[];
+  avgHits: number;
+  fourHitRate: number;
+  boosterHitRate: number;
+  rows: OptimizerDiagnosticRow[];
 }
 
 export interface ScrapeRun {
@@ -274,11 +370,67 @@ export const api = {
   runBacktest: (body: Record<string, unknown>) =>
     adminPost<{ success: boolean; backtest: BacktestRun }>('/api/backtest/run', body),
   runOptimizer: (body: Record<string, unknown>) =>
-    adminPost<{ success: boolean; optimizerRun: unknown; bestConfiguration: unknown; newModelId: number | null }>(
-      '/api/optimizer/run',
-      body,
-    ),
-};
+      adminPost<{ success: boolean; optimizerRun: unknown; bestConfiguration: unknown; newModelId: number | null }>(
+        '/api/optimizer/run',
+        body,
+      ),
+  
+    // -------------------------------------------------------------------------
+    // Optimizer workflow (automatic validation window, background jobs, checks)
+    // -------------------------------------------------------------------------
+    getOptimizerPreflight: (drawType: DrawType) =>
+      get<OptimizerPreflightResponse>(`/api/optimizer/preflight/${drawType}`),
+    startOptimizerRun: (body: {
+      drawType: DrawType;
+      populationSize?: number;
+      eliteSize?: number;
+      minValidationSamples?: number;
+      randomSeed?: number;
+      applyToModel?: boolean;
+      customWindow?: boolean;
+      validationStartDate?: string;
+      validationEndDate?: string;
+      allowDuplicate?: boolean;
+    }) =>
+      adminPost<{
+        success: boolean;
+        runId: number;
+        window: OptimizerWindow;
+        checks: OptimizerPreflightCheck[];
+        job: OptimizerJobState;
+      }>('/api/optimizer/run', body),
+    getOptimizerStatus: (runId: number) =>
+      get<{ success: boolean; source: string; job: OptimizerJobState }>(`/api/optimizer/status/${runId}`),
+    getActiveOptimizerJob: (drawType: DrawType) =>
+      get<{ success: boolean; drawType: DrawType; job: OptimizerJobState | null }>(
+        `/api/optimizer/active/${drawType}`,
+      ),
+    cancelOptimizerRun: (runId: number) =>
+      adminPost<{ success: boolean; job: OptimizerJobState }>(`/api/optimizer/cancel/${runId}`, {}),
+    applyOptimizerBest: (runId: number) =>
+      adminPost<{
+        success: boolean;
+        runId: number;
+        drawType: DrawType;
+        configId: number;
+        newModelId: number;
+      }>(`/api/optimizer/apply/${runId}`, {}),
+    runOptimizerDiagnostic: (body: {
+      drawType: DrawType;
+      sampleSize?: number;
+      customWindow?: boolean;
+      validationStartDate?: string;
+      validationEndDate?: string;
+    }) =>
+      adminPost<{ success: boolean; drawType: DrawType; report: OptimizerDiagnosticReport }>(
+        '/api/optimizer/diagnose',
+        body,
+      ),
+    getOptimizerRunDetails: (runId: number) =>
+      get<{ success: boolean; run: Record<string, unknown>; liveProgress: OptimizerJobState | null }>(
+        `/api/optimizer/run/${runId}`,
+      ),
+  };
 
 export function parseJson<T>(value: string | null, fallback: T): T {
   if (!value) return fallback;

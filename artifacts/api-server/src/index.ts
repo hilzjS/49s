@@ -1,6 +1,7 @@
 import app from "./app";
 import { pool } from "@workspace/db";
 import { logger } from "./lib/logger";
+import { recoverInterruptedJobs, shutdownOptimizerJobs } from "./lib/optimizer-jobs";
 
 function resolvePortFromArgv(): string | undefined {
   const args = process.argv.slice(2);
@@ -67,6 +68,22 @@ async function verifyDatabaseConnection(): Promise<void> {
   }
 }
 
+/**
+ * Optimizer jobs live in the process. A restart therefore orphans any run that
+ * was still queued/running, so those are marked failed on boot. A periodic sweep
+ * covers the same case for jobs that die later (crashed worker, stalled run), so
+ * a job can never stay permanently "running".
+ */
+const OPTIMIZER_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
+async function recoverOrphanedOptimizerJobs(): Promise<void> {
+  try {
+    await recoverInterruptedJobs("Interrupted by server restart — the optimizer run did not finish");
+  } catch (error) {
+    logger.error({ error }, "Failed to recover interrupted optimizer runs");
+  }
+}
+
 app.listen(port, (err) => {
   if (err) {
     logger.error({ err }, "Error listening on port");
@@ -74,5 +91,18 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
-  void verifyDatabaseConnection();
+    void verifyDatabaseConnection().then(() => recoverOrphanedOptimizerJobs());
+
+  const sweep = setInterval(() => {
+    void recoverInterruptedJobs("Optimizer run stalled — no progress was reported");
+  }, OPTIMIZER_SWEEP_INTERVAL_MS);
+  sweep.unref();
+
+  const shutdown = (signal: string): void => {
+    logger.info({ signal }, "Shutting down");
+    void shutdownOptimizerJobs().finally(() => process.exit(0));
+  };
+
+  process.once("SIGINT", () => shutdown("SIGINT"));
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
 });
