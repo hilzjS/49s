@@ -11,9 +11,9 @@
     "dev:scraper": "pnpm --filter @workspace/uk49s-scraper run dev",
     "dev:api": "pnpm --filter @workspace/api-server run dev",
     "db:init": "pnpm --filter @workspace/db run init",
-        "db:migrate": "pnpm --filter @workspace/db run init",
-        "db:push": "pnpm --filter @workspace/db run push",
-        "db:generate": "pnpm --filter @workspace/db run push",
+    "db:migrate": "pnpm --filter @workspace/db run init",
+    "db:push": "pnpm --filter @workspace/db run push",
+    "db:generate": "pnpm --filter @workspace/db run push",
     "test": "pnpm --filter @workspace/api-server run test",
     "test:watch": "pnpm --filter @workspace/api-server run test:watch",
     "scrape:uk49s": "curl -s -X POST http://localhost:3000/api/data/ingest -H \"Content-Type: application/json\" -H \"Authorization: Bearer ${ADMIN_API_KEY:-}\" -d '{\"year\": 2015}'",
@@ -26,8 +26,9 @@
   },
   "private": true,
   "dependencies": {
-      "@replit/connectors-sdk": "^0.4.1"
-    },
+    "@replit/connectors-sdk": "^0.4.1",
+    "@supabase/supabase-js": "^2.116.0"
+  },
   "devDependencies": {
     "prettier": "^3.9.6",
     "typescript": "~5.9.3"

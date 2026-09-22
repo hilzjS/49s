@@ -1,85 +1,68 @@
 import { type ReactNode } from 'react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { Route, Router as WouterRouter, Switch, useLocation } from 'wouter';
 import { ErrorBoundary } from '@/components/error-boundary';
-import { Toaster } from '@/components/ui/toaster';
-import { TooltipProvider } from '@/components/ui/tooltip';
+import { AuthProvider } from '@/lib/auth';
+import { AdminShell, UserShell } from '@/components/guards';
 import NotFound from '@/pages/not-found';
-import Home from '@/pages/home';
-import DashboardLayout from '@/pages/dashboard/Layout';
-import Overview from '@/pages/dashboard/Overview';
-import DataPage from '@/pages/dashboard/Data';
-import PredictionsPage from '@/pages/dashboard/Predictions';
-import BacktestPage from '@/pages/dashboard/Backtest';
-import OptimizerPage from '@/pages/dashboard/Optimizer';
-import PerformancePage from '@/pages/dashboard/Performance';
-import SettingsPage from '@/pages/dashboard/Settings';
-import DrawTypePage from '@/pages/dashboard/DrawType';
-import {
-  Route,
-  Switch,
-  useLocation,
-  Router as WouterRouter,
-} from 'wouter';
-
-const queryClient = new QueryClient();
-
-function LunchtimePage() {
-  return <DrawTypePage drawType="lunchtime" title="Lunchtime" subtitle="UK49s Lunchtime (13:00) historical data, model, predictions and performance." />;
-}
-
-function TeatimePage() {
-  return <DrawTypePage drawType="teatime" title="Teatime" subtitle="UK49s Teatime (18:45) historical data, model, predictions and performance." />;
-}
-
-function DashboardRoutes() {
-  return (
-    <DashboardLayout>
-      <Switch>
-        <Route path="/dashboard" component={Overview} />
-        <Route path="/dashboard/data" component={DataPage} />
-        <Route path="/dashboard/scraper" component={Home} />
-        <Route path="/dashboard/lunchtime" component={LunchtimePage} />
-        <Route path="/dashboard/teatime" component={TeatimePage} />
-        <Route path="/dashboard/predictions" component={PredictionsPage} />
-        <Route path="/dashboard/backtest" component={BacktestPage} />
-        <Route path="/dashboard/optimizer" component={OptimizerPage} />
-        <Route path="/dashboard/performance" component={PerformancePage} />
-        <Route path="/dashboard/settings" component={SettingsPage} />
-        <Route component={Overview} />
-      </Switch>
-    </DashboardLayout>
-  );
-}
-
-function Router() {
-  return (
-    <RoutedErrorBoundary>
-      <Switch>
-        <Route path="/dashboard" component={DashboardRoutes} />
-        <Route path="/dashboard/:path*" component={DashboardRoutes} />
-        <Route path="/" component={Home} />
-        <Route component={NotFound} />
-      </Switch>
-    </RoutedErrorBoundary>
-  );
-}
+import Landing from '@/pages/Landing';
+import Auth from '@/pages/Auth';
+import Home from '@/pages/app/Home';
+import Predictions from '@/pages/app/Predictions';
+import Results from '@/pages/app/Results';
+import Analytics from '@/pages/app/Analytics';
+import History from '@/pages/app/History';
+import Plans from '@/pages/app/Plans';
+import Subscription from '@/pages/app/Subscription';
+import AdminOverview from '@/pages/admin/Overview';
+import AdminScraper from '@/pages/admin/Scraper';
+import AdminModels from '@/pages/admin/Models';
+import AdminBacktesting from '@/pages/admin/Backtesting';
+import AdminOptimizer from '@/pages/admin/Optimizer';
+import AdminUsers from '@/pages/admin/Users';
+import AdminPayments from '@/pages/admin/Payments';
+import AdminSettings from '@/pages/admin/Settings';
 
 function RoutedErrorBoundary({ children }: { children: ReactNode }) {
   const [location] = useLocation();
   return <ErrorBoundary resetKey={location}>{children}</ErrorBoundary>;
 }
 
-function App() {
+function Router() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}>
-          <Router />
-        </WouterRouter>
-        <Toaster />
-      </TooltipProvider>
-    </QueryClientProvider>
+    <RoutedErrorBoundary>
+      <Switch>
+        <Route path="/" component={Landing} />
+        <Route path="/auth" component={Auth} />
+
+        <Route path="/app">{() => <UserShell><Home /></UserShell>}</Route>
+        <Route path="/app/predictions">{() => <UserShell><Predictions /></UserShell>}</Route>
+        <Route path="/app/results">{() => <UserShell><Results /></UserShell>}</Route>
+        <Route path="/app/analytics">{() => <UserShell><Analytics /></UserShell>}</Route>
+        <Route path="/app/history">{() => <UserShell><History /></UserShell>}</Route>
+        <Route path="/app/plans">{() => <UserShell><Plans /></UserShell>}</Route>
+        <Route path="/app/subscription">{() => <UserShell><Subscription /></UserShell>}</Route>
+
+        <Route path="/admin">{() => <AdminShell><AdminOverview /></AdminShell>}</Route>
+        <Route path="/admin/scraper">{() => <AdminShell><AdminScraper /></AdminShell>}</Route>
+        <Route path="/admin/models">{() => <AdminShell><AdminModels /></AdminShell>}</Route>
+        <Route path="/admin/backtesting">{() => <AdminShell><AdminBacktesting /></AdminShell>}</Route>
+        <Route path="/admin/optimizer">{() => <AdminShell><AdminOptimizer /></AdminShell>}</Route>
+        <Route path="/admin/users">{() => <AdminShell><AdminUsers /></AdminShell>}</Route>
+        <Route path="/admin/payments">{() => <AdminShell><AdminPayments /></AdminShell>}</Route>
+        <Route path="/admin/settings">{() => <AdminShell><AdminSettings /></AdminShell>}</Route>
+
+        <Route component={NotFound} />
+      </Switch>
+    </RoutedErrorBoundary>
   );
 }
 
-export default App;
+export default function App() {
+  return (
+    <AuthProvider>
+      <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}>
+        <Router />
+      </WouterRouter>
+    </AuthProvider>
+  );
+}
