@@ -10,10 +10,12 @@
  */
 import {
   DEFAULT_WEIGHTS,
+  DEFAULT_HYBRID_WEIGHTS,
   calculateAllFeatureScores,
   runBacktest,
   type BacktestResult,
   type DrawType,
+  type PredictionStrategy,
   type Uk49sDraw,
 } from "@workspace/db/schema";
 
@@ -272,6 +274,7 @@ export interface DiagnosticRow {
 
 export interface DiagnosticReport {
   drawType: DrawType;
+  strategy: PredictionStrategy;
   window: ValidationWindow;
   sampleRequested: number;
   validationDrawCount: number;
@@ -295,6 +298,7 @@ export function runPipelineDiagnostic(
   drawType: DrawType,
   window: ValidationWindow,
   sampleSize: number = DEFAULT_DIAGNOSTIC_SAMPLE,
+  strategy: PredictionStrategy = "superhybrid",
 ): DiagnosticReport {
   const series = sortDrawsForType(draws, drawType);
   const windowDraws = series.filter(
@@ -304,6 +308,7 @@ export function runPipelineDiagnostic(
 
   const empty: DiagnosticReport = {
     drawType,
+    strategy,
     window,
     sampleRequested: sampleSize,
     validationDrawCount: window.validationDrawCount,
@@ -325,16 +330,17 @@ export function runPipelineDiagnostic(
   }
 
   const result: BacktestResult = runBacktest(
-    draws,
-    {
-      drawType,
-      lookbackWindow: DEFAULT_LOOKBACK_WINDOW,
-      testStartDate: sample[0].drawDate,
-      testEndDate: sample[sample.length - 1].drawDate,
-      randomSeed: 1,
-    },
-    DEFAULT_WEIGHTS,
-  );
+      draws,
+      {
+        drawType,
+        lookbackWindow: DEFAULT_LOOKBACK_WINDOW,
+        testStartDate: sample[0].drawDate,
+        testEndDate: sample[sample.length - 1].drawDate,
+        randomSeed: 1,
+        strategy,
+      },
+      strategy === "hybrid" ? DEFAULT_HYBRID_WEIGHTS : DEFAULT_WEIGHTS,
+    );
 
   const indexByDate = new Map<string, number>();
   series.forEach((draw, index) => indexByDate.set(draw.drawDate, index));

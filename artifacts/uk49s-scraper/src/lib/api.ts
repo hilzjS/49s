@@ -128,6 +128,8 @@ export interface ModelInfo {
   drawType: DrawType;
   version: string;
   status: string;
+  strategy?: PredictionStrategy;
+  poolSize?: number;
   weights: Record<string, number>;
   lookbackWindow: number;
   constraints: { enforceDiversity: boolean; minNumberSpread: number; maxSameGroup: number };
@@ -321,6 +323,7 @@ export interface OptimizerDiagnosticRow {
 
 export interface OptimizerDiagnosticReport {
   drawType: DrawType;
+  strategy?: PredictionStrategy;
   window: OptimizerWindow;
   sampleRequested: number;
   validationDrawCount: number;
@@ -481,12 +484,13 @@ export const api = {
         } | null;
       }>(`/api/optimizer/apply/${runId}`, {}),
     runOptimizerDiagnostic: (body: {
-      drawType: DrawType;
-      sampleSize?: number;
-      customWindow?: boolean;
-      validationStartDate?: string;
-      validationEndDate?: string;
-    }) =>
+          drawType: DrawType;
+          strategy?: PredictionStrategy;
+          sampleSize?: number;
+          customWindow?: boolean;
+          validationStartDate?: string;
+          validationEndDate?: string;
+        }) =>
       adminPost<{ success: boolean; drawType: DrawType; report: OptimizerDiagnosticReport }>(
         '/api/optimizer/diagnose',
         body,

@@ -274,7 +274,7 @@ export default function AdminOptimizer() {
     setDiagnostic(null);
     setDiagnosticError(null);
     try {
-      const response = await api.runOptimizerDiagnostic({ drawType, sampleSize: 10 });
+      const response = await api.runOptimizerDiagnostic({ drawType, strategy, sampleSize: 10 });
       setDiagnostic(response.report);
     } catch (err) {
       setDiagnosticError(err instanceof Error ? err.message : 'Diagnostic failed');
@@ -711,8 +711,8 @@ export default function AdminOptimizer() {
               Run diagnostic (10 draws)
             </Button>
             <p className="text-[11.5px] text-[var(--text-3)]">
-              Uses the same automatic validation window and the default model configuration.
-            </p>
+                          Uses the same automatic validation window and the selected strategy ({strategyOption.label}).
+                        </p>
           </div>
 
           {diagnosticError ? (

@@ -59,10 +59,14 @@ export default function AdminModels() {
           ) : (
             <div className="space-y-5 p-5">
               <div className="flex flex-wrap gap-2">
-                <Badge tone="mint">{model.status}</Badge>
-                <Badge tone="sky">{model.lookbackWindow} draw lookback</Badge>
-                {model.trainingCutoff ? <Badge>cutoff {formatDate(model.trainingCutoff)}</Badge> : null}
-              </div>
+                              <Badge tone="mint">{model.status}</Badge>
+                              <Badge tone="violet">
+                                {model.strategy === 'hybrid' ? 'Super Hybrid (Freq · Gap · Bonus)' : 'SuperHybrid (13 features)'}
+                              </Badge>
+                              <Badge tone="sky">{model.lookbackWindow} draw lookback</Badge>
+                              {model.strategy === 'hybrid' ? <Badge>pool {model.poolSize ?? '—'}</Badge> : null}
+                              {model.trainingCutoff ? <Badge>cutoff {formatDate(model.trainingCutoff)}</Badge> : null}
+                            </div>
 
               <div className="grid grid-cols-3 gap-4">
                 <div>
@@ -121,21 +125,25 @@ export default function AdminModels() {
               <table className="table">
                 <thead>
                   <tr>
-                    <th>Version</th>
-                    <th>Status</th>
-                    <th>Lookback</th>
-                    <th>Val. avg</th>
-                    <th>Val. 4-hit</th>
-                    <th>Created</th>
-                  </tr>
+                                      <th>Version</th>
+                                      <th>Strategy</th>
+                                      <th>Status</th>
+                                      <th>Lookback</th>
+                                      <th>Val. avg</th>
+                                      <th>Val. 4-hit</th>
+                                      <th>Created</th>
+                                    </tr>
                 </thead>
                 <tbody>
                   {history.data.models.map((item) => (
                     <tr key={item.id}>
                       <td className="strong mono">{item.version}</td>
-                      <td>
-                        <Badge tone={item.status === 'active' ? 'mint' : 'neutral'}>{item.status}</Badge>
-                      </td>
+                                            <td className="text-[11.5px] text-[var(--text-3)]">
+                                              {item.strategy === 'hybrid' ? 'Super Hybrid' : 'SuperHybrid'}
+                                            </td>
+                                            <td>
+                                              <Badge tone={item.status === 'active' ? 'mint' : 'neutral'}>{item.status}</Badge>
+                                            </td>
                       <td className="mono">{item.lookbackWindow}</td>
                       <td className="mono">
                         {item.validationMetrics?.avgHits != null ? item.validationMetrics.avgHits.toFixed(2) : '—'}

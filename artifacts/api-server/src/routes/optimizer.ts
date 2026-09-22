@@ -541,29 +541,38 @@ router.post(
   "/diagnose",
   requireAdmin,
   asyncHandler(async (req, res) => {
-    const { drawType: rawDrawType, sampleSize = 10, customWindow = false, validationStartDate, validationEndDate } =
-      req.body ?? {};
-
-    const drawType = parseDrawType(rawDrawType);
-    if (!drawType) {
-      res.status(400).json({ error: "drawType must be 'lunchtime' or 'teatime'" });
-      return;
-    }
-
-    try {
-      const draws = await loadDrawsForType(drawType);
-      const useCustom = customWindow === true && validationStartDate && validationEndDate;
-      const window = useCustom
-        ? windowFromExplicitDates(draws, drawType, String(validationStartDate), String(validationEndDate))
-        : resolveValidationWindow(draws, drawType);
-
-      const report = runPipelineDiagnostic(draws, drawType, window, Number(sampleSize) || 10);
+    const {
+          drawType: rawDrawType,
+          strategy: rawStrategy,
+          sampleSize = 10,
+          customWindow = false,
+          validationStartDate,
+          validationEndDate,
+        } = req.body ?? {};
+    
+        const drawType = parseDrawType(rawDrawType);
+        if (!drawType) {
+          res.status(400).json({ error: "drawType must be 'lunchtime' or 'teatime'" });
+          return;
+        }
+    
+        const strategy: PredictionStrategy = isPredictionStrategy(rawStrategy) ? rawStrategy : "superhybrid";
+    
+        try {
+          const draws = await loadDrawsForType(drawType);
+          const useCustom = customWindow === true && validationStartDate && validationEndDate;
+          const window = useCustom
+            ? windowFromExplicitDates(draws, drawType, String(validationStartDate), String(validationEndDate))
+            : resolveValidationWindow(draws, drawType);
+    
+          const report = runPipelineDiagnostic(draws, drawType, window, Number(sampleSize) || 10, strategy);
 
       logger.info(
-        {
-          drawType,
-          validationDrawCount: report.validationDrawCount,
-          predictionsGenerated: report.predictionsGenerated,
+              {
+                drawType,
+                strategy,
+                validationDrawCount: report.validationDrawCount,
+                predictionsGenerated: report.predictionsGenerated,
           predictionsFailed: report.predictionsFailed,
           avgHits: report.avgHits,
           fourHitRate: report.fourHitRate,
@@ -582,12 +591,13 @@ router.post(
       );
 
       res.json({
-        success: true,
-        drawType,
-        report,
-        warning:
-          "Diagnostic results verify the evaluation pipeline only. The prediction algorithm was not modified.",
-      });
+              success: true,
+              drawType,
+              strategy,
+              report,
+              warning:
+                "Diagnostic results verify the evaluation pipeline only. The prediction algorithm was not modified.",
+            });
     } catch (error) {
       if (error instanceof OptimizerJobError) {
         res.status(error.statusCode).json({ success: false, code: error.code, error: error.message });
