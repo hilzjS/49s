@@ -50,7 +50,7 @@ function SessionPanel({
     );
   }
 
-  if (state.error) {
+  if (state.error && state.status !== 404) {
     return (
       <Card>
         <ErrorState message={state.error} onRetry={state.reload} />
@@ -65,7 +65,7 @@ function SessionPanel({
         <EmptyState
           icon={<Target size={20} />}
           title={`No ${label} prediction yet`}
-          description="A prediction is generated for each session once the model has enough validated history."
+          description="Nothing has been generated for this session yet."
         />
       </Card>
     );

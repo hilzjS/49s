@@ -23,6 +23,18 @@ export function setAdminKey(key: string): void {
   }
 }
 
+/** Error carrying the HTTP status so callers can distinguish "not yet
+ *  generated" (404) from a genuine failure. */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
   const text = await response.text();
@@ -39,7 +51,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       data && typeof data === 'object' && 'error' in data && typeof (data as { error: unknown }).error === 'string'
         ? (data as { error: string }).error
         : `Request failed (${response.status})`;
-    throw new Error(message);
+    throw new ApiError(message, response.status);
   }
   return data as T;
 }

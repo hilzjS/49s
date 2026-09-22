@@ -74,17 +74,28 @@ export default function Predictions() {
             value={drawType}
             onChange={(value) => setDrawType(value as DrawType)}
           />
+          {isAdmin ? (
+            <Button size="sm" variant="secondary" onClick={handleGenerate} loading={generating}>
+              <Wand2 size={15} /> Generate
+            </Button>
+          ) : null}
           <Button variant="ghost" size="sm" onClick={() => latest.reload()} aria-label="Refresh">
             <RefreshCw size={15} />
           </Button>
         </div>
       </div>
 
+      {generateError ? (
+        <div className="rounded-lg border border-[var(--coral)]/40 bg-[var(--coral)]/10 px-4 py-3 text-[12.5px] text-[#ffc0b8]">
+          {generateError}
+        </div>
+      ) : null}
+
       {latest.loading ? (
         <Card>
           <Spinner label={`Loading ${label} prediction…`} />
         </Card>
-      ) : latest.error ? (
+      ) : latest.error && latest.status !== 404 ? (
         <ErrorState message={latest.error} onRetry={latest.reload} />
       ) : !prediction ? (
         <Card>
@@ -93,8 +104,8 @@ export default function Predictions() {
             title={`No ${label} prediction available`}
             description={
               isAdmin
-                ? 'Generate one from the model, or ingest history first so the model has data to learn from.'
-                : 'The model generates a prediction for each session once enough validated history exists.'
+                ? 'Historical draws are loaded — generate the first prediction for this session.'
+                : 'The model generates a prediction for each session once history is available.'
             }
             action={isAdmin ? (
               <Button onClick={handleGenerate} loading={generating}>

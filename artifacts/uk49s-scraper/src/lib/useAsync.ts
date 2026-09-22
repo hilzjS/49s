@@ -3,6 +3,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 export interface AsyncState<T> {
   data: T | null;
   error: string | null;
+  /** HTTP status of the failure, when one is available (404 = not generated yet). */
+  status: number | null;
   loading: boolean;
   reload: () => void;
 }
@@ -14,6 +16,7 @@ export interface AsyncState<T> {
 export function useAsync<T>(loader: () => Promise<T>, deps: unknown[] = []): AsyncState<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [tick, setTick] = useState(0);
   const loaderRef = useRef(loader);
@@ -23,6 +26,7 @@ export function useAsync<T>(loader: () => Promise<T>, deps: unknown[] = []): Asy
     let active = true;
     setLoading(true);
     setError(null);
+    setStatus(null);
     loaderRef
       .current()
       .then((result) => {
@@ -33,7 +37,9 @@ export function useAsync<T>(loader: () => Promise<T>, deps: unknown[] = []): Asy
       })
       .catch((err: unknown) => {
         if (active) {
+          const status = (err as { status?: unknown } | null)?.status;
           setError(err instanceof Error ? err.message : 'Something went wrong');
+          setStatus(typeof status === 'number' ? status : null);
           setLoading(false);
         }
       });
@@ -44,7 +50,7 @@ export function useAsync<T>(loader: () => Promise<T>, deps: unknown[] = []): Asy
   }, [...deps, tick]);
 
   const reload = useCallback(() => setTick((v) => v + 1), []);
-  return { data, error, loading, reload };
+  return { data, error, status, loading, reload };
 }
 
 export function formatDate(value: string | null | undefined): string {
