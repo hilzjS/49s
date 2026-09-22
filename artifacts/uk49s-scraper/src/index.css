@@ -853,6 +853,77 @@ tbody tr:hover { background: #f8f5ec; }
   background: var(--elevate-1);
 }
 
+/* Database ingest controls */
+.ingest-body {
+  padding: 24px 25px;
+  display: grid;
+  gap: 18px;
+}
+
+.ingest-copy {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #57544c;
+}
+
+.ingest-admin-key {
+  display: grid;
+  gap: 6px;
+  max-width: 360px;
+}
+
+.ingest-admin-key span {
+  color: #8d8c84;
+  font: 500 9px var(--app-font-mono);
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+
+.ingest-admin-key input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #cbc6ba;
+  border-radius: 0;
+  outline: 0;
+  color: var(--ink);
+  background: #f9f7f1;
+  font: 500 12px var(--app-font-mono);
+}
+
+.ingest-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink);
+  opacity: .8;
+}
+
+.ingest-result {
+  display: grid;
+  gap: 8px;
+}
+
+.ingest-result-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.ingest-result-row strong {
+  text-transform: capitalize;
+}
+
+.ingest-result-total {
+  background: var(--elevate-1);
+}
+
 /* Warning Banner */
 .warning-banner {
   display: flex;

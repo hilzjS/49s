@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   AlertCircle,
   CalendarDays,
@@ -6,6 +6,8 @@ import {
   Database,
   Download,
   Filter,
+  KeyRound,
+  Play,
   RefreshCw,
   Table,
   XCircle,
@@ -44,36 +46,103 @@ interface ScrapeRun {
   completedAt: string | null;
 }
 
+interface IngestDrawTypeResult {
+  imported: number;
+  skipped: number;
+  rejected: number;
+  success: boolean;
+}
+
+interface IngestResult {
+  success: boolean;
+  lunchtime: IngestDrawTypeResult;
+  teatime: IngestDrawTypeResult;
+  totalImported: number;
+  totalSkipped: number;
+  totalRejected: number;
+}
+
+const currentYear = new Date().getFullYear();
+
 export default function DataPage() {
   const [data, setData] = useState<DataSummary | null>(null);
   const [scrapeRuns, setScrapeRuns] = useState<ScrapeRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'lunchtime' | 'teatime'>('lunchtime');
 
-  useEffect(() => {
-    async function fetchData() {
-      try {
-        const [summaryRes, runsRes] = await Promise.all([
-          fetch('/api/data/summary'),
-          fetch('/api/data/scrape-runs?limit=50'),
-        ]);
-        
-        if (summaryRes.ok) {
-          setData(await summaryRes.json());
-        }
-        if (runsRes.ok) {
-          const runs = await runsRes.json();
-          setScrapeRuns(runs.scrapeRuns || []);
-        }
-      } catch (e) {
-        console.error('Failed to load data:', e);
-      } finally {
-        setLoading(false);
+  // Database ingest controls
+  const [adminKey, setAdminKey] = useState('');
+  const [ingesting, setIngesting] = useState<null | 'full' | 'latest'>(null);
+  const [ingestResult, setIngestResult] = useState<IngestResult | null>(null);
+  const [ingestError, setIngestError] = useState<string | null>(null);
+
+  const loadData = useCallback(async () => {
+    try {
+      const [summaryRes, runsRes] = await Promise.all([
+        fetch('/api/data/summary'),
+        fetch('/api/data/scrape-runs?limit=50'),
+      ]);
+
+      if (summaryRes.ok) {
+        setData(await summaryRes.json());
       }
+      if (runsRes.ok) {
+        const runs = await runsRes.json();
+        setScrapeRuns(runs.scrapeRuns || []);
+      }
+    } catch (e) {
+      console.error('Failed to load data:', e);
+    } finally {
+      setLoading(false);
     }
-    
-    fetchData();
   }, []);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  async function runIngest(mode: 'full' | 'latest') {
+    setIngesting(mode);
+    setIngestError(null);
+    setIngestResult(null);
+
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (adminKey.trim()) headers['x-admin-key'] = adminKey.trim();
+
+      const body = mode === 'full'
+        ? { startYear: 2015, endYear: currentYear }
+        : { drawType: 'latest' };
+
+      const res = await fetch('/api/data/ingest', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        let message = `Request failed (${res.status})`;
+        try {
+          const payload = await res.json();
+          if (payload?.error) message = payload.error;
+        } catch {
+          // ignore non-JSON error bodies
+        }
+        if (res.status === 401) {
+          message = 'Admin key required. Set ADMIN_API_KEY, or paste it above and try again.';
+        }
+        throw new Error(message);
+      }
+
+      const result: IngestResult = await res.json();
+      setIngestResult(result);
+      await loadData();
+    } catch (e) {
+      setIngestError(e instanceof Error ? e.message : 'Ingestion failed');
+    } finally {
+      setIngesting(null);
+    }
+  }
 
   if (loading) {
     return (
@@ -101,6 +170,101 @@ export default function DataPage() {
           </p>
         </div>
       </div>
+
+      {/* Populate Database */}
+      <section className="section">
+        <h2 className="section-title">
+          <Database size={20} />
+          Populate Database
+        </h2>
+
+        <div className="panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Scrape &amp; store</p>
+              <h2>Load UK49s results into the database</h2>
+            </div>
+          </div>
+          <div className="ingest-body">
+            <p className="ingest-copy">
+              Fetch fresh UK49s results from the source archive and store them in the connected
+              database. Both <strong>Lunchtime</strong> and <strong>Teatime</strong> draws are collected.
+              Ingestion is idempotent — existing draws are skipped, so running it again never creates
+              duplicates. The full history can take a few minutes.
+            </p>
+
+            <label className="ingest-admin-key">
+              <span>Admin key (only if ADMIN_API_KEY is set)</span>
+              <input
+                type="password"
+                value={adminKey}
+                onChange={(event) => setAdminKey(event.target.value)}
+                placeholder="Optional"
+                autoComplete="off"
+                data-testid="input-admin-key"
+              />
+            </label>
+
+            <div className="export-buttons">
+              <button
+                className="btn btn-primary"
+                onClick={() => runIngest('full')}
+                disabled={ingesting !== null}
+                data-testid="button-ingest-full"
+              >
+                {ingesting === 'full' ? <RefreshCw size={16} className="spin" /> : <Play size={16} />}
+                {ingesting === 'full' ? 'Ingesting…' : `Populate full history (2015–${currentYear})`}
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={() => runIngest('latest')}
+                disabled={ingesting !== null}
+                data-testid="button-ingest-latest"
+              >
+                {ingesting === 'latest' ? <RefreshCw size={16} className="spin" /> : <RefreshCw size={16} />}
+                Update latest only
+              </button>
+            </div>
+
+            {ingesting && (
+              <p className="ingest-progress">
+                <RefreshCw size={14} className="spin" />
+                Collecting draws from the source archive — please keep this page open.
+              </p>
+            )}
+
+            {ingestError && (
+              <div className="alert alert-error" role="alert">
+                <AlertCircle size={18} />
+                <span>{ingestError}</span>
+              </div>
+            )}
+
+            {ingestResult && (
+              <div className="ingest-result" data-testid="ingest-result">
+                <div className="ingest-result-row">
+                  <span><strong>Lunchtime</strong></span>
+                  <span>Imported: <b>{ingestResult.lunchtime?.imported ?? 0}</b></span>
+                  <span>Skipped: <b>{ingestResult.lunchtime?.skipped ?? 0}</b></span>
+                  <span>Rejected: <b>{ingestResult.lunchtime?.rejected ?? 0}</b></span>
+                </div>
+                <div className="ingest-result-row">
+                  <span><strong>Teatime</strong></span>
+                  <span>Imported: <b>{ingestResult.teatime?.imported ?? 0}</b></span>
+                  <span>Skipped: <b>{ingestResult.teatime?.skipped ?? 0}</b></span>
+                  <span>Rejected: <b>{ingestResult.teatime?.rejected ?? 0}</b></span>
+                </div>
+                <div className="ingest-result-row ingest-result-total">
+                  <span><strong>Total</strong></span>
+                  <span>Imported: <b>{ingestResult.totalImported ?? 0}</b></span>
+                  <span>Skipped: <b>{ingestResult.totalSkipped ?? 0}</b></span>
+                  <span>Rejected: <b>{ingestResult.totalRejected ?? 0}</b></span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
 
       {/* Draw Type Tabs */}
       <div className="tabs">
