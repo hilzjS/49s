@@ -17,26 +17,34 @@ if (!port) {
   throw new Error("optimizer-worker must be started as a worker thread");
 }
 
-const { draws, optimizerConfig } = workerData as OptimizerWorkerInput;
+const { draws, optimizerConfig, searchOptions } = workerData as OptimizerWorkerInput;
 
 function post(message: OptimizerWorkerMessage): void {
   port!.postMessage(message);
 }
 
 try {
-  const result = optimizeModel(draws, optimizerConfig, (progress) => {
-    post({
-      type: "progress",
-      iteration: progress.iteration,
-      phase: progress.phase,
-      best4HitRate: progress.bestResult ? progress.bestResult.validation4HitRate : null,
-      bestAvgHits: progress.bestResult ? progress.bestResult.validationAvgHits : null,
-      bestScore: Number.isFinite(progress.bestScore) ? progress.bestScore : null,
-      currentLookbackWindow: progress.current.lookbackWindow,
-      currentWeights: progress.current.weights,
-      currentConstraints: progress.current.constraints,
-    });
-  });
+  const result = optimizeModel(
+    draws,
+    optimizerConfig,
+    (progress) => {
+      post({
+        type: "progress",
+        iteration: progress.iteration,
+        phase: progress.phase,
+        best4HitRate: progress.bestResult ? progress.bestResult.validation4HitRate : null,
+        bestAvgHits: progress.bestResult ? progress.bestResult.validationAvgHits : null,
+        bestScore: Number.isFinite(progress.bestScore) ? progress.bestScore : null,
+        currentLookbackWindow: progress.current.lookbackWindow,
+        currentWeights: progress.current.weights,
+        currentConstraints: progress.current.constraints,
+        maxHits: progress.maxHits,
+        fourHitCount: progress.fourHitCount,
+        fourHitFound: progress.fourHitFound,
+      });
+    },
+    searchOptions,
+  );
 
   post({ type: "done", result });
 } catch (error) {

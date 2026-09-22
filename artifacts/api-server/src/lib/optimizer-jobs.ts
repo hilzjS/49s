@@ -20,11 +20,15 @@ import { db } from "@workspace/db";
 import {
   uk49sOptimizerRuns,
   uk49sOptimizerConfigs,
+  type ConfigurationResult,
   type DiversityConstraints,
   type DrawType,
   type FeatureWeights,
+  type FourHitRecord,
   type OptimizerConfig,
   type OptimizerResult,
+  type OptimizerSearchOptions,
+  type OptimizerStopReason,
   type Uk49sDraw,
 } from "@workspace/db/schema";
 import { and, eq, inArray } from "drizzle-orm";
@@ -72,6 +76,19 @@ export interface OptimizerJobPublicState {
   validationDrawCount: number | null;
   autoWindow: boolean;
   hasResult: boolean;
+  /** Search goal / limits. */
+  maxConfigurations: number | null;
+  stopOnFourHit: boolean;
+  stoppedReason: OptimizerStopReason | null;
+  /** Best single-prediction hit count seen during the search. */
+  maxHits: number;
+  /** Number of configurations that produced a genuine 4-hit validation result. */
+  fourHitCount: number;
+  /** True when a historical validation prediction matched exactly 4 numbers. */
+  fourHitFound: boolean;
+  /** The evidenced 4-hit record, when one was found. */
+  fourHit: FourHitRecord | null;
+  fourHitConfigId: number | null;
 }
 
 interface OptimizerJob {
@@ -94,6 +111,14 @@ interface OptimizerJob {
   validationEndDate: string | null;
   validationDrawCount: number | null;
   autoWindow: boolean;
+  maxConfigurations: number | null;
+  stopOnFourHit: boolean;
+  stoppedReason: OptimizerStopReason | null;
+  maxHits: number;
+  fourHitCount: number;
+  fourHitFound: boolean;
+  fourHit: FourHitRecord | null;
+  fourHitConfigId: number | null;
   result: OptimizerResult | null;
     /**
      * Number of evaluated configurations, counted from the worker's progress
@@ -102,15 +127,15 @@ interface OptimizerJob {
      * total and must not be used for progress.
      */
     evaluations: number;
-      worker: Worker | null;
-      /**
-       * Set synchronously as soon as the worker reports a terminal message. The
-       * worker exits immediately after posting its result, so the `exit` handler
-       * must not treat that as a crash — the async finalize/DB write is still
-       * running at that point.
-       */
-      settled: boolean;
-      cancelRequested: boolean;
+    worker: Worker | null;
+    /**
+     * Set synchronously as soon as the worker reports a terminal message. The
+     * worker exits immediately after posting its result, so the `exit` handler
+     * must not treat that as a crash — the async finalize/DB write is still
+     * running at that point.
+     */
+    settled: boolean;
+    cancelRequested: boolean;
     lastProgressAt: number;
     lastPersistAt: number;
     /** Mirrors the existing explicit `applyToModel` request flag. */
@@ -155,6 +180,14 @@ function toPublic(job: OptimizerJob, includeResult = false): OptimizerJobPublicS
     validationDrawCount: job.validationDrawCount,
     autoWindow: job.autoWindow,
     hasResult: job.result !== null,
+    maxConfigurations: job.maxConfigurations,
+    stopOnFourHit: job.stopOnFourHit,
+    stoppedReason: job.stoppedReason,
+    maxHits: job.maxHits,
+    fourHitCount: job.fourHitCount,
+    fourHitFound: job.fourHitFound,
+    fourHit: job.fourHit,
+    fourHitConfigId: job.fourHitConfigId,
   };
 
   return includeResult ? { ...state, result: job.result ?? undefined } : state;
@@ -214,6 +247,9 @@ async function persistProgress(job: OptimizerJob, force = false): Promise<void> 
         currentIteration: job.currentIteration,
         best4HitRate: job.best4HitRate,
         bestAvgHits: job.bestAvgHits,
+        maxHits: job.maxHits,
+        fourHitFound: job.fourHitFound,
+        fourHitCount: job.fourHitCount,
         heartbeatAt: new Date(),
       })
       .where(eq(uk49sOptimizerRuns.id, job.runId));
@@ -235,8 +271,38 @@ function partitionResults(result: OptimizerResult): {
   return { evaluated, failedCount: result.allResults.length - evaluated.length };
 }
 
-async function storeConfigurationResults(runId: number, drawType: DrawType, result: OptimizerResult): Promise<void> {
-  const rows = result.allResults.slice(0, MAX_STORED_CONFIGS).map((config) => ({
+/**
+ * The existing selection criteria (unchanged): highest 4-hit rate, with the
+ * sample-size guard. Applied here to choose the preferred configuration among
+ * those that produced a genuine 4-hit.
+ */
+function existingSelectionScore(config: ConfigurationResult): number {
+  return config.validation4HitRate * 100 + config.stabilityScore * 0.1;
+}
+
+/**
+ * Chooses the configuration to record/apply. When a 4-hit was found, the choice
+ * is made among the successful 4-hit configurations using the existing criteria
+ * (no new ranking system is introduced); otherwise the same criteria are applied
+ * to all evaluated configurations, which yields the optimizer's existing best.
+ */
+function selectTargetConfiguration(result: OptimizerResult, minValidationSamples: number): ConfigurationResult | null {
+  const source = result.fourHitResults.length > 0 ? result.fourHitResults : result.allResults;
+  const eligible = source.filter((config) => config.validationSampleSize >= minValidationSamples);
+  const pool = eligible.length > 0 ? eligible : source;
+
+  // Same scoring formula and sample-size guard the optimizer itself uses.
+  return [...pool].sort((a, b) => existingSelectionScore(b) - existingSelectionScore(a))[0] ?? null;
+}
+
+function toStoredConfigRow(
+  runId: number,
+  drawType: DrawType,
+  config: ConfigurationResult,
+): typeof uk49sOptimizerConfigs.$inferInsert {
+  const fourHit = config.fourHitExamples[0] ?? null;
+
+  return {
     runId,
     drawType,
     weightFrequency: config.weights.weightFrequency,
@@ -260,14 +326,46 @@ async function storeConfigurationResults(runId: number, drawType: DrawType, resu
     validationAvgHits: config.validationAvgHits,
     validationSampleSize: config.validationSampleSize,
     validationBoosterHitRate: config.validationBoosterHitRate,
+    maxMainHits: config.validationMaxHits,
+    fourHitFound: config.validationFourHitCount > 0,
+    fourHitCount: config.validationFourHitCount,
+    fourHitDrawDate: fourHit ? fourHit.validationDrawDate : null,
+    fourHitPredictedMain: fourHit ? JSON.stringify(fourHit.predictedMain) : null,
+    fourHitActualMain: fourHit ? JSON.stringify(fourHit.actualMain) : null,
+    fourHitHits: fourHit ? fourHit.mainHits : null,
     stabilityScore: config.stabilityScore,
     randomSeed: config.randomSeed,
-  }));
+  };
+}
 
-  if (rows.length === 0) return;
+/**
+ * Stores the tested configurations and returns the database id of the chosen
+ * configuration (the 4-hit one when the target was reached).
+ */
+async function storeConfigurationResults(
+  runId: number,
+  drawType: DrawType,
+  result: OptimizerResult,
+  target: ConfigurationResult | null,
+): Promise<number | null> {
+  const stored = result.allResults.slice(0, MAX_STORED_CONFIGS);
+  const targetIndex = target ? result.allResults.indexOf(target) : -1;
+
+  // The configuration that achieved the target must always be persisted, even
+  // when it falls outside the stored slice.
+  const includeTargetSeparately = target !== null && targetIndex >= stored.length;
+
+  const rows = stored.map((config) => toStoredConfigRow(runId, drawType, config));
+  if (includeTargetSeparately && target) rows.push(toStoredConfigRow(runId, drawType, target));
+
+  if (rows.length === 0) return null;
 
   try {
-    await db.insert(uk49sOptimizerConfigs).values(rows);
+    const inserted = await db.insert(uk49sOptimizerConfigs).values(rows).returning({ id: uk49sOptimizerConfigs.id });
+
+    if (!target) return null;
+    const idIndex = includeTargetSeparately ? rows.length - 1 : targetIndex;
+    return inserted[idIndex]?.id ?? null;
   } catch (error) {
     logger.error({ error, runId }, "Failed to store optimizer configuration results");
     throw error;
@@ -282,6 +380,13 @@ async function finalizeSuccess(job: OptimizerJob, result: OptimizerResult): Prom
   job.configsFailed = failedCount;
   job.best4HitRate = result.validationResult.totalPredictions > 0 ? result.validationResult.fourHitRate : null;
   job.bestAvgHits = result.validationResult.totalPredictions > 0 ? result.validationResult.avgMainHits : null;
+  job.stoppedReason = result.stoppedReason;
+  job.maxHits = result.maxHits;
+  job.fourHitCount = result.fourHitResults.length;
+  job.fourHitFound = result.fourHitResults.length > 0;
+
+  const target = selectTargetConfiguration(result, job.minValidationSamples);
+  job.fourHit = target?.fourHitExamples[0] ?? null;
 
   /**
    * No configuration produced a single validation prediction: the pipeline
@@ -302,7 +407,8 @@ async function finalizeSuccess(job: OptimizerJob, result: OptimizerResult): Prom
   }
 
   try {
-    await storeConfigurationResults(job.runId, job.drawType, result);
+    const targetConfigId = await storeConfigurationResults(job.runId, job.drawType, result, target);
+    job.fourHitConfigId = targetConfigId;
 
     await db
       .update(uk49sOptimizerRuns)
@@ -314,33 +420,46 @@ async function finalizeSuccess(job: OptimizerJob, result: OptimizerResult): Prom
         best4HitRate: job.best4HitRate,
         bestAvgHits: job.bestAvgHits,
         validationDrawCount: job.validationDrawCount,
+        stoppedReason: result.stoppedReason,
+        maxHits: result.maxHits,
+        fourHitFound: job.fourHitFound,
+        fourHitCount: job.fourHitCount,
+        fourHitConfigId: targetConfigId,
+        fourHitDrawDate: job.fourHit?.validationDrawDate ?? null,
+        fourHitPredictedMain: job.fourHit ? JSON.stringify(job.fourHit.predictedMain) : null,
+        fourHitActualMain: job.fourHit ? JSON.stringify(job.fourHit.actualMain) : null,
+        fourHitHits: job.fourHit?.mainHits ?? null,
+        bestConfigId: targetConfigId,
         errorMessage: null,
         completedAt: new Date(),
         heartbeatAt: new Date(),
       })
       .where(eq(uk49sOptimizerRuns.id, job.runId));
-      
-          job.status = "completed";
-          job.finishedAt = Date.now();
-          job.worker = null;
-      
-          if (job.applyOnComplete && result.validationResult.totalPredictions >= job.minValidationSamples) {
-            try {
-              await updateActiveModel(
-                job.drawType,
-                result.bestWeights,
-                result.bestLookbackWindow,
-                result.bestConstraints,
-                result.validationResult.fourHitRate,
-                result.validationResult.avgMainHits,
-                result.validationResult.totalPredictions,
-              );
-              logger.info({ runId: job.runId, drawType: job.drawType }, "Applied best optimizer configuration as active model");
-            } catch (error) {
-              logger.error({ error, runId: job.runId }, "Failed to apply best optimizer configuration");
-            }
-          }
-        } catch (error) {
+
+    job.status = "completed";
+    job.finishedAt = Date.now();
+    job.worker = null;
+
+    if (job.applyOnComplete && target && target.validationSampleSize >= job.minValidationSamples) {
+      try {
+        await updateActiveModel(
+          job.drawType,
+          target.weights,
+          target.lookbackWindow,
+          target.constraints,
+          target.validation4HitRate,
+          target.validationAvgHits,
+          target.validationSampleSize,
+        );
+        logger.info(
+          { runId: job.runId, drawType: job.drawType, fourHit: job.fourHitFound },
+          "Applied optimizer configuration as active model",
+        );
+      } catch (error) {
+        logger.error({ error, runId: job.runId }, "Failed to apply optimizer configuration");
+      }
+    }
+  } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to store optimizer results";
     job.status = "failed";
     job.errorMessage = message;
@@ -355,16 +474,20 @@ export interface StartOptimizerJobParams {
   draws: Uk49sDraw[];
   optimizerConfig: OptimizerConfig;
   validationDrawCount: number;
-    autoWindow: boolean;
-    /** Explicitly allow a second concurrent run for the same draw type. */
-    allowDuplicate?: boolean;
-    /**
-     * Existing behaviour: when the request explicitly asks for it, the best
-     * configuration is applied as the active model once the run completes. Never
-     * applied automatically otherwise.
-     */
-    applyOnComplete?: boolean;
-  }
+  autoWindow: boolean;
+  /** Explicitly allow a second concurrent run for the same draw type. */
+  allowDuplicate?: boolean;
+  /**
+   * Existing behaviour: when the request explicitly asks for it, the best
+   * configuration is applied as the active model once the run completes. Never
+   * applied automatically otherwise.
+   */
+  applyOnComplete?: boolean;
+  /** Hard cap on configurations evaluated. */
+  maxConfigurations?: number;
+  /** Stop the search as soon as a valid 4-hit validation result is found. */
+  stopOnFourHit?: boolean;
+}
 
 /**
  * Creates the run record and starts the optimizer worker.
@@ -374,6 +497,8 @@ export interface StartOptimizerJobParams {
  */
 export async function startOptimizerJob(params: StartOptimizerJobParams): Promise<OptimizerJobPublicState> {
   const { drawType, draws, optimizerConfig, validationDrawCount, autoWindow } = params;
+  const maxConfigurations = params.maxConfigurations && params.maxConfigurations > 0 ? params.maxConfigurations : null;
+  const stopOnFourHit = params.stopOnFourHit === true;
 
   const inMemory = getActiveJobForDrawType(drawType);
 
@@ -391,7 +516,9 @@ export async function startOptimizerJob(params: StartOptimizerJobParams): Promis
     );
   }
 
-  const totalConfigs = optimizerConfig.populationSize + optimizerConfig.eliteSize * 50;
+  const searchCapacity = optimizerConfig.populationSize + optimizerConfig.eliteSize * 50;
+  // Reported plan: the cap when one was requested, otherwise the search capacity.
+  const totalConfigs = maxConfigurations ? Math.min(maxConfigurations, searchCapacity) : searchCapacity;
 
   const [run] = await db
     .insert(uk49sOptimizerRuns)
@@ -414,6 +541,8 @@ export async function startOptimizerJob(params: StartOptimizerJobParams): Promis
       validationDrawCount,
       currentIteration: 0,
       autoWindow,
+      maxConfigurations: maxConfigurations ?? null,
+      stopOnFourHit,
       startedAt: new Date(),
       heartbeatAt: new Date(),
     })
@@ -439,6 +568,14 @@ export async function startOptimizerJob(params: StartOptimizerJobParams): Promis
     validationEndDate: optimizerConfig.validationEndDate,
     validationDrawCount,
     autoWindow,
+    maxConfigurations,
+    stopOnFourHit,
+    stoppedReason: null,
+    maxHits: 0,
+    fourHitCount: 0,
+    fourHitFound: false,
+    fourHit: null,
+    fourHitConfigId: null,
     result: null,
     evaluations: 0,
     worker: null,
@@ -461,7 +598,11 @@ export async function startOptimizerJob(params: StartOptimizerJobParams): Promis
 
   jobs.set(run.id, job);
 
-  const workerData: OptimizerWorkerInput = { draws, optimizerConfig };
+  const searchOptions: OptimizerSearchOptions = {
+    maxConfigurations: maxConfigurations ?? undefined,
+    stopOnFourHit,
+  };
+  const workerData: OptimizerWorkerInput = { draws, optimizerConfig, searchOptions };
 
   let worker: Worker;
   try {
@@ -548,6 +689,9 @@ async function handleWorkerMessage(job: OptimizerJob, message: OptimizerWorkerMe
       job.bestScore = message.bestScore;
       job.best4HitRate = message.best4HitRate;
       job.bestAvgHits = message.bestAvgHits;
+      job.maxHits = message.maxHits;
+      job.fourHitCount = message.fourHitCount;
+      job.fourHitFound = message.fourHitFound;
       job.currentConfig = {
         lookbackWindow: message.currentLookbackWindow,
         weights: message.currentWeights,
@@ -559,7 +703,7 @@ async function handleWorkerMessage(job: OptimizerJob, message: OptimizerWorkerMe
       job.configsTested = job.evaluations;
       job.lastProgressAt = Date.now();
             await persistProgress(job);
-      break;
+            break;
     }
     case "done": {
       await finalizeSuccess(job, message.result);
@@ -669,6 +813,25 @@ async function rebuildStateFromRow(runId: number): Promise<OptimizerJobPublicSta
     validationDrawCount: row.validationDrawCount,
     autoWindow: row.autoWindow,
     hasResult: false,
+    maxConfigurations: row.maxConfigurations,
+    stopOnFourHit: row.stopOnFourHit,
+    stoppedReason: (row.stoppedReason as OptimizerStopReason | null) ?? null,
+    maxHits: row.maxHits ?? 0,
+    fourHitCount: row.fourHitCount,
+    fourHitFound: row.fourHitFound,
+    fourHit:
+      row.fourHitDrawDate && row.fourHitPredictedMain && row.fourHitActualMain
+        ? {
+            validationDrawDate: row.fourHitDrawDate,
+            trainingCutoff: "",
+            predictedMain: JSON.parse(row.fourHitPredictedMain) as number[],
+            predictedBooster: 0,
+            actualMain: JSON.parse(row.fourHitActualMain) as number[],
+            actualBooster: 0,
+            mainHits: row.fourHitHits ?? 4,
+          }
+        : null,
+    fourHitConfigId: row.fourHitConfigId,
   };
 }
 

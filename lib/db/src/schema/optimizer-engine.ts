@@ -25,6 +25,29 @@ export interface OptimizerConfig {
   randomSeed?: number;
 }
 
+/** Why the search stopped. */
+export type OptimizerStopReason =
+  | "four-hit-found"
+  | "max-configurations-reached"
+  | "search-exhausted";
+
+/**
+ * One historical validation prediction. Recorded only when it matched exactly
+ * four numbers, so the 4-hit target can be evidenced rather than asserted.
+ */
+export interface FourHitRecord {
+  validationDrawDate: string;
+  trainingCutoff: string;
+  predictedMain: number[];
+  predictedBooster: number;
+  actualMain: number[];
+  actualBooster: number;
+  mainHits: number;
+}
+
+/** How many example 4-hit predictions are kept per configuration. */
+export const MAX_FOUR_HIT_EXAMPLES = 5;
+
 export interface OptimizerResult {
   bestWeights: FeatureWeights;
   bestConstraints: DiversityConstraints;
@@ -33,6 +56,15 @@ export interface OptimizerResult {
   testResult?: BacktestResult;
   iterations: number;
   allResults: ConfigurationResult[];
+  /** Every configuration that produced at least one exact 4-hit prediction. */
+  fourHitResults: ConfigurationResult[];
+  /** True when at least one validation prediction matched exactly 4 numbers. */
+  fourHitFound: boolean;
+  /** Best single-prediction hit count seen during the whole search. */
+  maxHits: number;
+  /** Configurations actually evaluated. */
+  evaluatedConfigurations: number;
+  stoppedReason: OptimizerStopReason;
 }
 
 export interface ConfigurationResult {
@@ -43,8 +75,25 @@ export interface ConfigurationResult {
   validationAvgHits: number;
   validationSampleSize: number;
   validationBoosterHitRate: number;
+  /** Highest number of matches achieved by a single validation prediction. */
+  validationMaxHits: number;
+  /** Number of validation predictions that matched exactly 4 numbers. */
+  validationFourHitCount: number;
+  /** The exact 4-hit predictions (evidenced from the actual historical draws). */
+  fourHitExamples: FourHitRecord[];
   stabilityScore: number;
   randomSeed: number;
+}
+
+/**
+ * Search control only. The configuration generation, evaluation and scoring are
+ * unchanged — these options merely decide when to stop searching.
+ */
+export interface OptimizerSearchOptions {
+  /** Hard cap on how many configurations may be evaluated. */
+  maxConfigurations?: number;
+  /** Stop as soon as a valid 4-hit validation result is found. */
+  stopOnFourHit?: boolean;
 }
 
 /**
@@ -64,6 +113,12 @@ export interface OptimizerProgress {
     lookbackWindow: number;
   };
   phase: "random-search" | "hill-climbing";
+  /** Best single-prediction hit count seen so far. */
+  maxHits: number;
+  /** Number of configurations that produced at least one exact 4-hit. */
+  fourHitCount: number;
+  /** Whether a valid 4-hit validation result has been found. */
+  fourHitFound: boolean;
 }
 
 // Weight ranges for mutation
@@ -168,104 +223,204 @@ function evaluateConfig(
   };
   
   const result = runBacktest(draws, backtestConfig, config.weights, config.constraints);
+    
+    // Calculate stability score (would need multiple runs in production)
+    // Simplified: use sample size as proxy for stability
+    const stabilityScore = result.totalPredictions >= optimizerConfig.minValidationSamples ? 1 : 0.5;
   
-  // Calculate stability score (would need multiple runs in production)
-  // Simplified: use sample size as proxy for stability
-  const stabilityScore = result.totalPredictions >= optimizerConfig.minValidationSamples ? 1 : 0.5;
+    /**
+     * Reporting only: the existing backtest already compares every prediction
+     * against the actual historical draw. These derived counters surface that
+     * comparison so a genuine 4-hit can be evidenced instead of inferred. The
+     * hit counts themselves are produced by the existing scoring pipeline.
+     */
+    const fourHitPredictions = result.predictions.filter((prediction) => prediction.mainHits === 4);
+    
+      const fourHitExamples: FourHitRecord[] = fourHitPredictions
+        .slice(0, MAX_FOUR_HIT_EXAMPLES)
+        .map((prediction) => ({
+        validationDrawDate: prediction.predictionDate,
+        trainingCutoff: prediction.trainingCutoff,
+        predictedMain: prediction.predictedMain,
+        predictedBooster: prediction.predictedBooster,
+        actualMain: prediction.actualMain,
+        actualBooster: prediction.actualBooster,
+        mainHits: prediction.mainHits,
+      }));
   
-  return {
-    weights: config.weights,
-    constraints: config.constraints,
-    lookbackWindow: config.lookbackWindow,
-    validation4HitRate: result.fourHitRate,
-    validationAvgHits: result.avgMainHits,
-    validationSampleSize: result.totalPredictions,
-    validationBoosterHitRate: result.boosterHitRate,
-    stabilityScore,
-    randomSeed: seed,
-  };
-}
+    const validationMaxHits = result.predictions.reduce(
+      (max, prediction) => Math.max(max, prediction.mainHits),
+      0,
+    );
+  
+    return {
+      weights: config.weights,
+      constraints: config.constraints,
+      lookbackWindow: config.lookbackWindow,
+      validation4HitRate: result.fourHitRate,
+      validationAvgHits: result.avgMainHits,
+      validationSampleSize: result.totalPredictions,
+      validationBoosterHitRate: result.boosterHitRate,
+      validationMaxHits,
+          validationFourHitCount: fourHitPredictions.length,
+          fourHitExamples,
+      stabilityScore,
+      randomSeed: seed,
+    };
+  }
 
 // Main optimization function
 export function optimizeModel(
   draws: Uk49sDraw[],
   optimizerConfig: OptimizerConfig,
-  progressCallback?: (progress: OptimizerProgress) => void
+  progressCallback?: (progress: OptimizerProgress) => void,
+  searchOptions?: OptimizerSearchOptions
 ): OptimizerResult {
   const rng = optimizerConfig.randomSeed
     ? seededRandom(optimizerConfig.randomSeed)
     : Math.random;
-  
+
+  const maxConfigurations =
+    searchOptions?.maxConfigurations && searchOptions.maxConfigurations > 0
+      ? searchOptions.maxConfigurations
+      : Number.POSITIVE_INFINITY;
+  const stopOnFourHit = searchOptions?.stopOnFourHit === true;
+
   const allResults: ConfigurationResult[] = [];
+  const fourHitResults: ConfigurationResult[] = [];
   let bestResult: ConfigurationResult | null = null;
   let bestScore = -Infinity;
-  
-  // Phase 1: Random Search
-  for (let i = 0; i < optimizerConfig.populationSize; i++) {
-    // Keep seeds within Postgres int4 range
-    const seed = optimizerConfig.randomSeed ? optimizerConfig.randomSeed + i : (1 + i * 7919) % 2147483647;
-    const config = generateRandomConfig(rng, seed);
-    const result = evaluateConfig(draws, config, optimizerConfig, seed);
-    
+  let maxHits = 0;
+  let evaluated = 0;
+  let stoppedReason: OptimizerStopReason = "search-exhausted";
+  let targetFound = false;
+
+  /**
+   * Applies the existing scoring rule (unchanged), the existing minimum-sample
+   * guard, and additionally remembers any configuration that produced a genuine
+   * 4-hit. Returns true when the search must stop because the target was hit.
+   */
+  const recordResult = (result: ConfigurationResult): boolean => {
     allResults.push(result);
-    
+    evaluated += 1;
+
+    maxHits = Math.max(maxHits, result.validationMaxHits);
+
+    if (result.validationFourHitCount > 0) {
+      fourHitResults.push(result);
+      targetFound = true;
+    }
+
     // Score based on 4-hit rate (primary) and sample size (secondary)
     const score = result.validation4HitRate * 100 + (result.stabilityScore * 0.1);
-    
+
     if (score > bestScore && result.validationSampleSize >= optimizerConfig.minValidationSamples) {
       bestScore = score;
       bestResult = result;
     }
-    
+
+    return stopOnFourHit && targetFound;
+  };
+
+  // Phase 1: Random Search
+  for (let i = 0; i < optimizerConfig.populationSize; i++) {
+    if (evaluated >= maxConfigurations) {
+      stoppedReason = "max-configurations-reached";
+      break;
+    }
+
+    // Keep seeds within Postgres int4 range
+    const seed = optimizerConfig.randomSeed ? optimizerConfig.randomSeed + i : (1 + i * 7919) % 2147483647;
+    const config = generateRandomConfig(rng, seed);
+    const result = evaluateConfig(draws, config, optimizerConfig, seed);
+
+    const stop = recordResult(result);
+
     progressCallback?.({
       iteration: i + 1,
       bestScore,
       bestResult,
       current: config,
       phase: "random-search",
+      maxHits,
+      fourHitCount: fourHitResults.length,
+      fourHitFound: targetFound,
     });
+
+    if (stop) {
+      stoppedReason = "four-hit-found";
+      break;
+    }
   }
-  
-  // Phase 2: Hill Climbing from best results
-  const eliteResults = allResults
-    .filter(r => r.validationSampleSize >= optimizerConfig.minValidationSamples)
-    .sort((a, b) => b.validation4HitRate - a.validation4HitRate)
-    .slice(0, optimizerConfig.eliteSize);
-  
+
+  // Phase 2: Hill Climbing from best results (skipped once the target is hit)
+  const eliteResults = targetFound && stopOnFourHit
+    ? []
+    : allResults
+        .filter(r => r.validationSampleSize >= optimizerConfig.minValidationSamples)
+        .sort((a, b) => b.validation4HitRate - a.validation4HitRate)
+        .slice(0, optimizerConfig.eliteSize);
+
   for (const elite of eliteResults) {
+    if (evaluated >= maxConfigurations) {
+      stoppedReason = "max-configurations-reached";
+      break;
+    }
+
     const eliteConfig = {
       weights: elite.weights,
       constraints: elite.constraints,
       lookbackWindow: elite.lookbackWindow,
     };
-    
+
     for (let i = 0; i < 50; i++) {
+      if (evaluated >= maxConfigurations) {
+        stoppedReason = "max-configurations-reached";
+        break;
+      }
+
       const mutated = mutateConfig(eliteConfig, rng, optimizerConfig.mutationRate);
       // Keep seeds within Postgres int4 range
       const hillSeed = ((optimizerConfig.randomSeed ?? 1) * 100003 + i * 997) % 2147483647;
       const result = evaluateConfig(draws, mutated, optimizerConfig, hillSeed);
-      
-      allResults.push(result);
-      
+
       const score = result.validation4HitRate * 100 + (result.stabilityScore * 0.1);
-      
+            allResults.push(result);
+            evaluated += 1;
+      maxHits = Math.max(maxHits, result.validationMaxHits);
+
+      if (result.validationFourHitCount > 0) {
+        fourHitResults.push(result);
+        targetFound = true;
+      }
+
       if (score > bestScore && result.validationSampleSize >= optimizerConfig.minValidationSamples) {
         bestScore = score;
         bestResult = result;
         // Update elite config for further mutation
         Object.assign(eliteConfig, mutated);
       }
-      
+
       progressCallback?.({
         iteration: optimizerConfig.populationSize + i + 1,
         bestScore,
         bestResult,
         current: mutated,
         phase: "hill-climbing",
+        maxHits,
+        fourHitCount: fourHitResults.length,
+        fourHitFound: targetFound,
       });
+
+      if (stopOnFourHit && targetFound) {
+        stoppedReason = "four-hit-found";
+        break;
+      }
     }
+
+    if (stoppedReason === "four-hit-found" || stoppedReason === "max-configurations-reached") break;
   }
-  
+
   if (!bestResult) {
     // Fall back to defaults
     return {
@@ -275,9 +430,14 @@ export function optimizeModel(
       validationResult: createEmptyBacktestResult(),
       iterations: allResults.length,
       allResults,
+      fourHitResults,
+      fourHitFound: fourHitResults.length > 0,
+      maxHits,
+      evaluatedConfigurations: evaluated,
+      stoppedReason,
     };
   }
-  
+
   // Run final validation on test set if provided
   let testResult: BacktestResult | undefined;
   if (optimizerConfig.testStartDate && optimizerConfig.testEndDate) {
@@ -290,7 +450,7 @@ export function optimizeModel(
     };
     testResult = runBacktest(draws, testConfig, bestResult.weights, bestResult.constraints);
   }
-  
+
   // Run validation result again for final output
   const finalValidationConfig: BacktestConfig = {
     drawType: optimizerConfig.drawType,
@@ -300,7 +460,7 @@ export function optimizeModel(
     randomSeed: optimizerConfig.randomSeed,
   };
   const validationResult = runBacktest(draws, finalValidationConfig, bestResult.weights, bestResult.constraints);
-  
+
   return {
     bestWeights: bestResult.weights,
     bestConstraints: bestResult.constraints,
@@ -309,6 +469,11 @@ export function optimizeModel(
     testResult,
     iterations: allResults.length,
     allResults,
+    fourHitResults,
+    fourHitFound: fourHitResults.length > 0,
+    maxHits,
+    evaluatedConfigurations: evaluated,
+    stoppedReason,
   };
 }
 

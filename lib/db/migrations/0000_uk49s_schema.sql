@@ -136,6 +136,17 @@ CREATE TABLE IF NOT EXISTS uk49s_optimizer_runs (
   current_iteration     integer NOT NULL DEFAULT 0,
   auto_window           boolean NOT NULL DEFAULT false,
   error_message         text,
+  max_configurations    integer,
+  stop_on_four_hit      boolean NOT NULL DEFAULT false,
+  stopped_reason        text,
+  max_hits              integer,
+  four_hit_found        boolean NOT NULL DEFAULT false,
+  four_hit_count        integer NOT NULL DEFAULT 0,
+  four_hit_config_id    integer,
+  four_hit_draw_date    text,
+  four_hit_predicted_main text,
+  four_hit_actual_main  text,
+  four_hit_hits         integer,
   best_config_id        integer,
   best_4hit_rate        real,
   best_avg_hits         real,
@@ -154,6 +165,28 @@ ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS current_iteration inte
 ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS auto_window boolean NOT NULL DEFAULT false;
 ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS error_message text;
 ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS heartbeat_at timestamp;
+
+-- Additive: 4-hit search goal, stop conditions and target evidence.
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS max_configurations integer;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS stop_on_four_hit boolean NOT NULL DEFAULT false;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS stopped_reason text;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS max_hits integer;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS four_hit_found boolean NOT NULL DEFAULT false;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS four_hit_count integer NOT NULL DEFAULT 0;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS four_hit_config_id integer;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS four_hit_draw_date text;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS four_hit_predicted_main text;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS four_hit_actual_main text;
+ALTER TABLE uk49s_optimizer_runs ADD COLUMN IF NOT EXISTS four_hit_hits integer;
+
+-- Additive: per-configuration 4-hit evidence on uk49s_optimizer_configs.
+ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS max_main_hits integer;
+ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS four_hit_found boolean NOT NULL DEFAULT false;
+ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS four_hit_count integer NOT NULL DEFAULT 0;
+ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS four_hit_draw_date text;
+ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS four_hit_predicted_main text;
+ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS four_hit_actual_main text;
+ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS four_hit_hits integer;
 
 CREATE INDEX IF NOT EXISTS uk49s_optimizer_runs_type_status_idx
   ON uk49s_optimizer_runs (draw_type, status);

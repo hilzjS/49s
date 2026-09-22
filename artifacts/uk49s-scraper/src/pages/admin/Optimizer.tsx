@@ -1,11 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, CheckCircle2, FlaskConical, Play, ShieldCheck, Square, TriangleAlert, Wand2 } from 'lucide-react';
+import {
+  Activity,
+  CheckCircle2,
+  Crosshair,
+  FlaskConical,
+  Play,
+  ShieldCheck,
+  Square,
+  Target,
+  TriangleAlert,
+  Wand2,
+} from 'lucide-react';
 import {
   api,
   type DrawType,
   type OptimizerDiagnosticReport,
   type OptimizerJobState,
   type OptimizerJobStatus,
+  type OptimizerStopReason,
   type OptimizerWindow,
 } from '@/lib/api';
 import { useAsync, formatDateTime } from '@/lib/useAsync';
@@ -18,11 +30,15 @@ import {
   Input,
   PanelHeader,
   ProgressBar,
+  Select,
   Spinner,
   StatCard,
   Tabs,
   percent,
 } from '@/components/ui';
+
+const MAX_CONFIGURATION_OPTIONS = [100, 500, 1000, 5000];
+const FOUR_HIT_TARGET = 4;
 
 /** Formats a YYYY-MM-DD draw date without any timezone shift. */
 function formatIsoDate(value: string | null | undefined): string {
@@ -58,9 +74,28 @@ function statusTone(status: OptimizerJobStatus): 'mint' | 'sky' | 'coral' | 'gol
   }
 }
 
-function windowLabel(window: OptimizerWindow | null | undefined): string {
-  if (!window) return '—';
-  return `${formatIsoDate(window.validationStartDate)} → ${formatIsoDate(window.validationEndDate)}`;
+function windowLabel(validationWindow: OptimizerWindow | null | undefined): string {
+  if (!validationWindow) return '—';
+  return `${formatIsoDate(validationWindow.validationStartDate)} → ${formatIsoDate(validationWindow.validationEndDate)}`;
+}
+
+/** Human explanation of why the search stopped (no performance claim). */
+function stopReasonText(reason: OptimizerStopReason | null, job: OptimizerJobState | null): string {
+  if (!job) return '—';
+  switch (reason) {
+    case 'four-hit-found':
+      return `4-hit target found after ${job.configsTested} configuration${job.configsTested === 1 ? '' : 's'}.`;
+    case 'max-configurations-reached':
+      return `Maximum ${job.maxConfigurations ?? job.totalConfigs} configurations reached. ${
+        job.fourHitFound ? 'A 4-hit configuration was also found.' : 'No 4-hit configuration found.'
+      }`;
+    case 'search-exhausted':
+      return `Search space exhausted after ${job.configsTested} configurations. ${
+        job.fourHitFound ? 'A 4-hit configuration was found.' : 'No 4-hit configuration found.'
+      }`;
+    default:
+      return '—';
+  }
 }
 
 export default function AdminOptimizer() {
@@ -70,7 +105,8 @@ export default function AdminOptimizer() {
   const [customWindow, setCustomWindow] = useState(false);
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
-  const [populationSize, setPopulationSize] = useState(100);
+  const [maxConfigurations, setMaxConfigurations] = useState(1000);
+  const [stopOnFourHit, setStopOnFourHit] = useState(true);
   const [applyToModel, setApplyToModel] = useState(false);
   const [busy, setBusy] = useState(false);
   const [applying, setApplying] = useState(false);
@@ -84,7 +120,7 @@ export default function AdminOptimizer() {
   const history = useAsync(() => api.getOptimizerHistory(drawType), [drawType]);
 
   const label = drawType === 'lunchtime' ? 'Lunchtime' : 'Teatime';
-  const window = preflight.data?.window ?? null;
+  const validationWindow = preflight.data?.window ?? null;
   const runs = history.data?.optimizationRuns ?? [];
   const isLive = job?.status === 'running' || job?.status === 'queued';
   const pollRef = useRef<number | null>(null);
@@ -99,10 +135,10 @@ export default function AdminOptimizer() {
 
   // Seed the advanced custom dates from the automatically selected window.
   useEffect(() => {
-    if (!window) return;
-    setCustomStart((value) => value || window.validationStartDate);
-    setCustomEnd((value) => value || window.validationEndDate);
-  }, [window]);
+    if (!validationWindow) return;
+    setCustomStart((value) => value || validationWindow.validationStartDate);
+    setCustomEnd((value) => value || validationWindow.validationEndDate);
+  }, [validationWindow]);
 
   // Live progress polling. Only runs while a job is queued or running.
   useEffect(() => {
@@ -137,13 +173,26 @@ export default function AdminOptimizer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job?.runId, isLive]);
 
-  const estimatedTotal = useMemo(() => populationSize + 10 * 50, [populationSize]);
-  const totalConfigs = job && job.totalConfigs > 0 ? job.totalConfigs : estimatedTotal;
-  const testedRatio = totalConfigs > 0 && job ? Math.min(100, (job.configsTested / totalConfigs) * 100) : 0;
+  const plannedConfigurations = job?.maxConfigurations ?? job?.totalConfigs ?? maxConfigurations;
+  const testedRatio =
+    plannedConfigurations > 0 && job ? Math.min(100, (job.configsTested / plannedConfigurations) * 100) : 0;
 
   const bestEvaluatedRun = runs.find(
     (run) => run.status === 'completed' && run.bestMetrics.fourHitRate != null && run.configsTested > 0,
   );
+  const fourHitRuns = useMemo(() => runs.filter((run) => run.fourHitFound), [runs]);
+
+  const statusText = !job
+    ? 'Idle'
+    : job.status === 'running' || job.status === 'queued'
+      ? 'Searching…'
+      : job.status === 'completed'
+        ? job.fourHitFound
+          ? 'TARGET FOUND — 4 HITS'
+          : 'Finished — no 4-hit configuration found'
+        : job.status === 'failed'
+          ? 'Failed'
+          : 'Cancelled';
 
   async function runAuto() {
     setBusy(true);
@@ -153,7 +202,8 @@ export default function AdminOptimizer() {
     try {
       const body: Parameters<typeof api.startOptimizerRun>[0] = {
         drawType,
-        populationSize,
+        maxConfigurations,
+        stopOnFourHit,
         applyToModel,
       };
 
@@ -166,7 +216,7 @@ export default function AdminOptimizer() {
       const response = await api.startOptimizerRun(body);
       setJob(response.job);
       setMessage(
-        `Optimization started for the ${label} model — validation ${windowLabel(response.window)} (${response.window.validationDrawCount} draws).`,
+        `Searching for a 4-hit configuration on the ${label} model — validation ${windowLabel(response.window)} (${response.window.validationDrawCount} draws), up to ${maxConfigurations} configurations.`,
       );
       preflight.reload();
       history.reload();
@@ -202,10 +252,12 @@ export default function AdminOptimizer() {
     try {
       const response = await api.applyOptimizerBest(job.runId);
       setMessage(
-        `Best configuration of run #${response.runId} applied as the active ${label} model (model #${response.newModelId}).`,
+        response.fourHitFound
+          ? `4-hit configuration #${response.configId} is now used for future ${label} predictions (model #${response.newModelId}).`
+          : `Configuration #${response.configId} is now used for future ${label} predictions (model #${response.newModelId}).`,
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to apply the best configuration');
+      setError(err instanceof Error ? err.message : 'Failed to apply the configuration');
     } finally {
       setApplying(false);
     }
@@ -232,7 +284,7 @@ export default function AdminOptimizer() {
           <p className="eyebrow">Administration</p>
           <h1 className="mt-1.5 text-[26px] font-semibold tracking-[-0.02em]">Optimizer</h1>
           <p className="mt-1 text-[13px] text-[var(--text-3)]">
-            Evaluating configurations against the existing predictor for the {label} model.
+            Searching for a configuration that produces a 4-hit result on {label} historical validation draws.
           </p>
         </div>
         <Tabs
@@ -256,25 +308,142 @@ export default function AdminOptimizer() {
         </div>
       ) : null}
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        <StatCard label="Runs" value={runs.length} hint={`${label} history`} tone="sky" />
-        <StatCard
-          label="Best 4-hit rate"
-          value={bestEvaluatedRun ? percent(bestEvaluatedRun.bestMetrics.fourHitRate) : '—'}
-          hint="Successfully evaluated runs"
-          tone="gold"
+      {/* Target / progress panel -------------------------------------------- */}
+      <Card>
+        <PanelHeader
+          title="Optimization target"
+          subtitle={`${label} model only — Lunchtime and Teatime are optimized independently`}
+          right={<Target size={16} className="text-[var(--gold)]" />}
         />
-        <StatCard
-          label="Best avg hits"
-          value={
-            bestEvaluatedRun && bestEvaluatedRun.bestMetrics.avgHits != null
-              ? bestEvaluatedRun.bestMetrics.avgHits.toFixed(2)
-              : '—'
-          }
-          hint="Successfully evaluated runs"
-          tone="mint"
-        />
-      </div>
+        <div className="space-y-4 p-5">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <StatCard label="Target" value={`${FOUR_HIT_TARGET} hits`} hint="Historical validation" tone="gold" />
+            <StatCard
+              label="Current best"
+              value={`${job?.maxHits ?? 0} hits`}
+              hint="Best single prediction so far"
+              tone="sky"
+            />
+            <StatCard
+              label="Configurations tested"
+              value={`${job?.configsTested ?? 0} / ${plannedConfigurations}`}
+              hint="Incremented only after a real evaluation"
+              tone="violet"
+            />
+            <StatCard
+              label="4-hit results found"
+              value={job?.fourHitCount ?? 0}
+              hint="Configurations with a genuine 4-hit"
+              tone={job?.fourHitFound ? 'mint' : 'coral'}
+            />
+            <StatCard label="Validation draws" value={job?.validationDrawCount ?? validationWindow?.validationDrawCount ?? '—'} tone="sky" />
+            <StatCard
+              label="Current best average"
+              value={job?.bestAvgHits != null ? job.bestAvgHits.toFixed(2) : '—'}
+              hint="Existing average-hits metric"
+              tone="mint"
+            />
+            <StatCard
+              label="Elapsed"
+              value={job ? formatDuration(job.elapsedMs) : '—'}
+              tone="violet"
+            />
+            <StatCard
+              label="Status"
+              value={<span className="text-[15px]">{statusText}</span>}
+              hint={job?.phase ? `${job.phase} phase` : undefined}
+              tone={job?.fourHitFound ? 'mint' : 'sky'}
+            />
+          </div>
+
+          {job && isLive ? (
+            <div className="space-y-2">
+              <ProgressBar value={testedRatio} tone="violet" />
+              <div className="flex flex-wrap justify-between gap-2 text-[11.5px] text-[var(--text-3)]">
+                <span>
+                  Current configuration:{' '}
+                  <span className="mono text-[var(--text-2)]">
+                    {job.currentConfig ? `lookback ${job.currentConfig.lookbackWindow}` : '—'}
+                  </span>
+                </span>
+                <span>Searching…</span>
+              </div>
+            </div>
+          ) : null}
+
+          {job && !isLive && job.status !== 'failed' ? (
+            <div className="rounded-lg border border-[var(--line-2)] bg-[var(--surface-2)] px-4 py-3 text-[12.5px] text-[var(--text-2)]">
+              <span className="font-medium text-[var(--text)]">Stopped:</span> {stopReasonText(job.stoppedReason, job)}
+            </div>
+          ) : null}
+        </div>
+      </Card>
+
+      {/* 4-hit result ------------------------------------------------------- */}
+      {job?.fourHitFound && job.fourHit ? (
+        <Card>
+          <PanelHeader
+            title="4-hit configuration found in historical validation"
+            subtitle="A real validation prediction compared against the actual historical draw — not a guarantee of future results"
+            right={<Crosshair size={16} className="text-[var(--mint)]" />}
+          />
+          <div className="space-y-4 p-5">
+            <div className="rounded-lg border border-[var(--mint)]/40 bg-[var(--mint)]/10 px-4 py-3 text-[13px] font-semibold text-[#9ff0d0]">
+              TARGET FOUND — 4 HITS
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <StatCard
+                label="Configuration"
+                value={job.fourHitConfigId != null ? `#${job.fourHitConfigId}` : '—'}
+                tone="violet"
+              />
+              <StatCard
+                label="Validation draw"
+                value={<span className="text-[16px]">{formatIsoDate(job.fourHit.validationDrawDate)}</span>}
+                tone="sky"
+              />
+              <StatCard label="Hits" value={job.fourHit.mainHits} tone="mint" />
+              <StatCard label="Configurations tested" value={job.configsTested} tone="gold" />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-lg bg-[var(--surface-2)] px-4 py-3">
+                <p className="eyebrow">Prediction</p>
+                <p className="mono mt-1.5 text-[14px] text-[var(--text)]">
+                  {[...job.fourHit.predictedMain, job.fourHit.predictedBooster]
+                    .map((n) => String(n).padStart(2, '0'))
+                    .join(' · ')}
+                </p>
+              </div>
+              <div className="rounded-lg bg-[var(--surface-2)] px-4 py-3">
+                <p className="eyebrow">Actual draw</p>
+                <p className="mono mt-1.5 text-[14px] text-[var(--text)]">
+                  {[...job.fourHit.actualMain, job.fourHit.actualBooster]
+                    .map((n) => String(n).padStart(2, '0'))
+                    .join(' · ')}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-[12px] text-[var(--text-3)]">
+              Validation window: {job.validationStartDate ? formatIsoDate(job.validationStartDate) : '—'} →{' '}
+              {job.validationEndDate ? formatIsoDate(job.validationEndDate) : '—'} · trained only on draws before{' '}
+              {formatIsoDate(job.fourHit.validationDrawDate)}.
+            </p>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <Button onClick={applyBest} loading={applying}>
+                Use This Configuration For Predictions
+              </Button>
+              <p className="text-[11.5px] text-[var(--text-3)]">
+                Applies the configuration to the existing {label} prediction system. The prediction algorithm itself is
+                unchanged.
+              </p>
+            </div>
+          </div>
+        </Card>
+      ) : null}
 
       {/* Automatic validation window + preflight checks ---------------------- */}
       <Card>
@@ -293,16 +462,16 @@ export default function AdminOptimizer() {
             <div className="grid gap-4 sm:grid-cols-3">
               <StatCard
                 label="Automatic validation"
-                value={<span className="text-[17px]">{windowLabel(window)}</span>}
-                hint={window ? `~${window.monthsCovered} months` : undefined}
+                value={<span className="text-[17px]">{windowLabel(validationWindow)}</span>}
+                hint={validationWindow ? `~${validationWindow.monthsCovered} months` : undefined}
                 tone="violet"
               />
               <StatCard
                 label="Validation draws"
-                value={window?.validationDrawCount ?? '—'}
+                value={validationWindow?.validationDrawCount ?? '—'}
                 hint={
-                  window
-                    ? window.usedLargestAvailableWindow
+                  validationWindow
+                    ? validationWindow.usedLargestAvailableWindow
                       ? 'Largest available window'
                       : 'Most recent ~12 months'
                     : undefined
@@ -311,7 +480,7 @@ export default function AdminOptimizer() {
               />
               <StatCard
                 label={`Latest ${label} draw`}
-                value={<span className="text-[17px]">{formatIsoDate(window?.latestDrawDate)}</span>}
+                value={<span className="text-[17px]">{formatIsoDate(validationWindow?.latestDrawDate)}</span>}
                 hint="Reserved as the next prediction reference"
                 tone="gold"
               />
@@ -320,7 +489,8 @@ export default function AdminOptimizer() {
             <p className="text-[12px] text-[var(--text-3)]">
               Validation ends before the latest draw, so no future draw is ever used and the predicted draw is excluded
               from its own evaluation. Training history before the window:{' '}
-              <span className="mono text-[var(--text-2)]">{window?.trainingDrawsBeforeWindow ?? '—'}</span> draws.
+              <span className="mono text-[var(--text-2)]">{validationWindow?.trainingDrawsBeforeWindow ?? '—'}</span>{' '}
+              draws.
             </p>
 
             <div className="grid gap-2 sm:grid-cols-2">
@@ -349,7 +519,7 @@ export default function AdminOptimizer() {
       <Card>
         <PanelHeader
           title="Run Auto Optimization"
-          subtitle={`Optimizing the ${label} model only — Lunchtime and Teatime stay independent`}
+          subtitle={`Searches ${label} configurations until a 4-hit validation result is found or the limit is reached`}
           right={<Wand2 size={16} className="text-[var(--gold)]" />}
         />
         <div className="space-y-4 p-5">
@@ -366,24 +536,40 @@ export default function AdminOptimizer() {
               {advanced ? 'Hide advanced options' : 'Advanced options'}
             </Button>
             <p className="text-[11.5px] text-[var(--text-3)]">
-              Validation window is chosen automatically. Numbers below are the existing predictor's metrics.
+              Validation window is chosen automatically from the stored history.
             </p>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Max configurations" hint="Hard stop — the search can never run indefinitely">
+              <Select
+                value={String(maxConfigurations)}
+                onChange={(e) => setMaxConfigurations(Number(e.target.value))}
+                disabled={isLive}
+              >
+                {MAX_CONFIGURATION_OPTIONS.map((option) => (
+                  <option key={option} value={option}>
+                    {option.toLocaleString('en-GB')}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+
+            <label className="flex items-center gap-2 self-end pb-2.5 text-[12.5px] text-[var(--text-2)]">
+              <input
+                type="checkbox"
+                checked={stopOnFourHit}
+                onChange={(e) => setStopOnFourHit(e.target.checked)}
+                disabled={isLive}
+                className="h-4 w-4 accent-[var(--gold)]"
+              />
+              Stop when 4 hits found
+            </label>
           </div>
 
           {advanced ? (
             <div className="grid gap-4 rounded-lg bg-[var(--surface-2)] p-4 sm:grid-cols-2">
-              <Field label="Configurations per search phase" hint="Random-search population (unchanged strategy)">
-                <Input
-                  type="number"
-                  min={10}
-                  max={1000}
-                  value={populationSize}
-                  onChange={(e) => setPopulationSize(Number(e.target.value))}
-                  disabled={isLive}
-                />
-              </Field>
-
-              <label className="flex items-center gap-2 self-end pb-2.5 text-[12.5px] text-[var(--text-2)]">
+              <label className="flex items-center gap-2 text-[12.5px] text-[var(--text-2)]">
                 <input
                   type="checkbox"
                   checked={customWindow}
@@ -392,6 +578,17 @@ export default function AdminOptimizer() {
                   className="h-4 w-4 accent-[var(--gold)]"
                 />
                 Use custom validation dates
+              </label>
+
+              <label className="flex items-center gap-2 text-[12.5px] text-[var(--text-2)]">
+                <input
+                  type="checkbox"
+                  checked={applyToModel}
+                  onChange={(e) => setApplyToModel(e.target.checked)}
+                  disabled={isLive}
+                  className="h-4 w-4 accent-[var(--gold)]"
+                />
+                Apply the found configuration automatically when the run completes
               </label>
 
               {customWindow ? (
@@ -404,7 +601,10 @@ export default function AdminOptimizer() {
                       disabled={isLive}
                     />
                   </Field>
-                  <Field label="Validation end" hint={`Must be before ${formatIsoDate(window?.latestDrawDate)}`}>
+                  <Field
+                    label="Validation end"
+                    hint={`Must be before ${formatIsoDate(validationWindow?.latestDrawDate)}`}
+                  >
                     <Input
                       type="date"
                       value={customEnd}
@@ -414,23 +614,12 @@ export default function AdminOptimizer() {
                   </Field>
                 </>
               ) : null}
-
-              <label className="flex items-center gap-2 text-[12.5px] text-[var(--text-2)]">
-                <input
-                  type="checkbox"
-                  checked={applyToModel}
-                  onChange={(e) => setApplyToModel(e.target.checked)}
-                  disabled={isLive}
-                  className="h-4 w-4 accent-[var(--gold)]"
-                />
-                Apply best config as new model when the run completes
-              </label>
             </div>
           ) : null}
         </div>
       </Card>
 
-      {/* Live progress / result --------------------------------------------- */}
+      {/* Live run detail ----------------------------------------------------- */}
       {job ? (
         <Card>
           <PanelHeader
@@ -445,53 +634,13 @@ export default function AdminOptimizer() {
             right={<Badge tone={statusTone(job.status)}>{job.status}</Badge>}
           />
 
-          <div className="space-y-5 p-5">
-            {isLive ? (
-              <>
-                <div className="space-y-2">
-                  <div className="flex items-baseline justify-between">
-                    <span className="text-[12.5px] text-[var(--text-2)]">
-                      Progress: <span className="mono text-[var(--text)]">{job.configsTested}</span> /{' '}
-                      <span className="mono">{totalConfigs}</span> configurations
-                    </span>
-                    <span className="text-[11.5px] text-[var(--text-3)]">
-                      {job.phase === 'hill-climbing' ? 'Hill-climbing phase' : 'Random-search phase'}
-                    </span>
-                  </div>
-                  <ProgressBar value={testedRatio} tone="violet" />
-                </div>
-
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                  <StatCard label="Validation draws" value={job.validationDrawCount ?? '—'} tone="sky" />
-                  <StatCard label="Configurations tested" value={job.configsTested} tone="violet" />
-                  <StatCard label="Configurations failed" value={job.configsFailed} tone="coral" />
-                  <StatCard label="Elapsed" value={formatDuration(job.elapsedMs)} tone="gold" />
-                  <StatCard
-                    label="Current best avg hits"
-                    value={job.bestAvgHits != null ? job.bestAvgHits.toFixed(2) : '—'}
-                    tone="mint"
-                  />
-                  <StatCard label="Current best 4-hit rate" value={percent(job.best4HitRate)} tone="gold" />
-                  <StatCard
-                    label="Current configuration"
-                    value={
-                      job.currentConfig ? (
-                        <span className="text-[15px]">lookback {job.currentConfig.lookbackWindow}</span>
-                      ) : (
-                        '—'
-                      )
-                    }
-                    hint={job.currentConfig ? `iteration ${job.currentIteration}` : undefined}
-                    tone="sky"
-                  />
-                  <StatCard
-                    label="Started"
-                    value={<span className="text-[15px]">{formatDateTime(job.startedAt)}</span>}
-                    tone="violet"
-                  />
-                </div>
-              </>
-            ) : null}
+          <div className="space-y-4 p-5">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <StatCard label="Started" value={<span className="text-[15px]">{formatDateTime(job.startedAt)}</span>} tone="violet" />
+              <StatCard label="Configurations tested" value={job.configsTested} tone="violet" />
+              <StatCard label="Configurations failed" value={job.configsFailed} tone="coral" />
+              <StatCard label="Current best average" value={job.bestAvgHits != null ? job.bestAvgHits.toFixed(2) : '—'} tone="mint" />
+            </div>
 
             {job.status === 'failed' ? (
               <div className="rounded-lg border border-[var(--coral)]/40 bg-[var(--coral)]/10 px-4 py-3 text-[12.5px] text-[#ffc0b8]">
@@ -506,38 +655,22 @@ export default function AdminOptimizer() {
               </div>
             ) : null}
 
-            {job.status === 'completed' ? (
-              <div className="space-y-4">
-                <div className="rounded-lg border border-[var(--mint)]/40 bg-[var(--mint)]/10 px-4 py-3 text-[12.5px] text-[#9ff0d0]">
-                  Optimization completed
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                  <StatCard label="Draw type" value={<span className="text-[17px]">{label}</span>} tone="violet" />
-                  <StatCard
-                    label="Validation"
-                    value={<span className="text-[15px]">{windowLabel(jobToWindow(job))}</span>}
-                    tone="sky"
-                  />
-                  <StatCard label="Validation draws" value={job.validationDrawCount ?? '—'} tone="sky" />
-                  <StatCard label="Configurations tested" value={job.configsTested} tone="mint" />
-                  <StatCard label="Configurations failed" value={job.configsFailed} tone="coral" />
-                  <StatCard
-                    label="Best average hits"
-                    value={job.bestAvgHits != null ? job.bestAvgHits.toFixed(2) : '—'}
-                    tone="mint"
-                  />
-                  <StatCard label="Best 4-hit rate" value={percent(job.best4HitRate)} tone="gold" />
-                  <StatCard label="Elapsed" value={formatDuration(job.elapsedMs)} tone="violet" />
-                </div>
+            {job.status === 'completed' && !job.fourHitFound ? (
+              <div className="rounded-lg border border-[var(--gold)]/40 bg-[var(--gold)]/10 px-4 py-3 text-[12.5px] text-[var(--text-2)]">
+                No 4-hit configuration was found in this validation window. Best average hits:{' '}
+                <span className="mono">{job.bestAvgHits != null ? job.bestAvgHits.toFixed(2) : '—'}</span>.{' '}
+                {stopReasonText(job.stoppedReason, job)}
+              </div>
+            ) : null}
 
-                <div className="flex flex-wrap items-center gap-3">
-                  <Button variant="secondary" onClick={applyBest} loading={applying}>
-                    Apply best config as new model
-                  </Button>
-                  <p className="text-[11.5px] text-[var(--text-3)]">
-                    Applying only creates a new active {label} model — the prediction algorithm itself is unchanged.
-                  </p>
-                </div>
+            {job.status === 'completed' ? (
+              <div className="flex flex-wrap items-center gap-3">
+                <Button variant="secondary" onClick={applyBest} loading={applying}>
+                  {job.fourHitFound ? 'Use This Configuration For Predictions' : 'Use best configuration for predictions'}
+                </Button>
+                <p className="text-[11.5px] text-[var(--text-3)]">
+                  Applying only creates a new active {label} model — the prediction algorithm itself is unchanged.
+                </p>
               </div>
             ) : null}
           </div>
@@ -637,13 +770,13 @@ export default function AdminOptimizer() {
       <Card className="overflow-hidden">
         <PanelHeader
           title={`${label} optimization history`}
-          subtitle="Most recent first — failed runs are never counted as zero-performance configurations"
+          subtitle={`${fourHitRuns.length} run${fourHitRuns.length === 1 ? '' : 's'} found a 4-hit configuration · failed runs are never counted as zero-performance`}
           right={<FlaskConical size={16} className="text-[var(--text-3)]" />}
         />
         {history.loading ? (
           <Spinner />
         ) : runs.length === 0 ? (
-          <EmptyState title="No optimizer runs yet" description="Run auto optimization to search for better weights." />
+          <EmptyState title="No optimizer runs yet" description="Run auto optimization to search for a 4-hit configuration." />
         ) : (
           <div className="overflow-x-auto">
             <table className="table">
@@ -652,11 +785,11 @@ export default function AdminOptimizer() {
                   <th>Started</th>
                   <th>Status</th>
                   <th>Configs tested</th>
-                  <th>Configs failed</th>
+                  <th>Stopped because</th>
                   <th>Validation window</th>
                   <th>Draws</th>
+                  <th>4-hit</th>
                   <th>Best avg hits</th>
-                  <th>Best 4-hit</th>
                 </tr>
               </thead>
               <tbody>
@@ -669,20 +802,37 @@ export default function AdminOptimizer() {
                         <p className="mt-1 max-w-[240px] text-[11px] text-[var(--text-3)]">{run.errorMessage}</p>
                       ) : null}
                     </td>
-                    <td className="mono">{run.configsTested}</td>
-                    <td className="mono">{run.configsFailed ?? 0}</td>
+                    <td className="mono">
+                      {run.configsTested}
+                      {run.maxConfigurations ? ` / ${run.maxConfigurations}` : ''}
+                    </td>
+                    <td className="text-[11.5px] text-[var(--text-3)]">
+                      {run.stoppedReason === 'four-hit-found'
+                        ? '4-hit found'
+                        : run.stoppedReason === 'max-configurations-reached'
+                          ? 'Max configs'
+                          : run.stoppedReason === 'search-exhausted'
+                            ? 'Search exhausted'
+                            : '—'}
+                    </td>
                     <td className="text-[11.5px]">
                       {formatIsoDate(run.validationPeriod.startDate)} → {formatIsoDate(run.validationPeriod.endDate)}
                     </td>
                     <td className="mono">{run.validationDrawCount ?? '—'}</td>
+                    <td>
+                      {run.fourHitFound ? (
+                        <Badge tone="mint">
+                          {run.fourHitHits ?? 4} hits · {formatIsoDate(run.fourHitDrawDate)}
+                        </Badge>
+                      ) : run.status === 'completed' ? (
+                        <span className="text-[11.5px] text-[var(--text-3)]">none</span>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
                     <td className="mono">
                       {run.status === 'completed' && run.bestMetrics.avgHits != null
                         ? run.bestMetrics.avgHits.toFixed(2)
-                        : '—'}
-                    </td>
-                    <td className="mono">
-                      {run.status === 'completed' && run.bestMetrics.fourHitRate != null
-                        ? percent(run.bestMetrics.fourHitRate)
                         : '—'}
                     </td>
                   </tr>
@@ -694,22 +844,4 @@ export default function AdminOptimizer() {
       </Card>
     </div>
   );
-}
-
-/** Rebuilds a window-shaped object from a job for label rendering. */
-function jobToWindow(job: OptimizerJobState): OptimizerWindow | null {
-  if (!job.validationStartDate || !job.validationEndDate) return null;
-  return {
-    drawType: job.drawType,
-    earliestDrawDate: job.validationStartDate,
-    latestDrawDate: job.validationEndDate,
-    referenceDrawDate: job.validationEndDate,
-    totalDraws: 0,
-    trainingDrawsBeforeWindow: 0,
-    validationStartDate: job.validationStartDate,
-    validationEndDate: job.validationEndDate,
-    validationDrawCount: job.validationDrawCount ?? 0,
-    monthsCovered: 0,
-    usedLargestAvailableWindow: false,
-  };
 }

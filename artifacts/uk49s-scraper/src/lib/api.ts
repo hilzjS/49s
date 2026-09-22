@@ -175,6 +175,19 @@ export interface BacktestHistoryItem {
   completedAt: string | null;
 }
 
+export type OptimizerStopReason = 'four-hit-found' | 'max-configurations-reached' | 'search-exhausted';
+
+/** A historical validation prediction that matched exactly four numbers. */
+export interface FourHitRecord {
+  validationDrawDate: string;
+  trainingCutoff: string;
+  predictedMain: number[];
+  predictedBooster: number;
+  actualMain: number[];
+  actualBooster: number;
+  mainHits: number;
+}
+
 export interface OptimizerRunItem {
   id: number;
   drawType?: DrawType;
@@ -182,6 +195,17 @@ export interface OptimizerRunItem {
   configsTested: number;
   configsFailed?: number;
   totalConfigs?: number | null;
+  maxConfigurations?: number | null;
+  stopOnFourHit?: boolean;
+  stoppedReason?: OptimizerStopReason | null;
+  maxHits?: number | null;
+  fourHitFound?: boolean;
+  fourHitCount?: number;
+  fourHitConfigId?: number | null;
+  fourHitDrawDate?: string | null;
+  fourHitPredictedMain?: string | null;
+  fourHitActualMain?: string | null;
+  fourHitHits?: number | null;
   validationDrawCount?: number | null;
   autoWindow?: boolean;
   errorMessage?: string | null;
@@ -239,9 +263,17 @@ export interface OptimizerJobState {
   validationStartDate: string | null;
   validationEndDate: string | null;
   validationDrawCount: number | null;
-  autoWindow: boolean;
-  hasResult: boolean;
-}
+    autoWindow: boolean;
+    hasResult: boolean;
+    maxConfigurations: number | null;
+    stopOnFourHit: boolean;
+    stoppedReason: OptimizerStopReason | null;
+    maxHits: number;
+    fourHitCount: number;
+    fourHitFound: boolean;
+    fourHit: FourHitRecord | null;
+    fourHitConfigId: number | null;
+  }
 
 export interface OptimizerPreflightResponse {
   success: boolean;
@@ -382,6 +414,8 @@ export const api = {
       get<OptimizerPreflightResponse>(`/api/optimizer/preflight/${drawType}`),
     startOptimizerRun: (body: {
       drawType: DrawType;
+      maxConfigurations?: number;
+      stopOnFourHit?: boolean;
       populationSize?: number;
       eliteSize?: number;
       minValidationSamples?: number;
@@ -414,6 +448,13 @@ export const api = {
         drawType: DrawType;
         configId: number;
         newModelId: number;
+        fourHitFound: boolean;
+        fourHit: {
+          validationDrawDate: string | null;
+          predictedMain: number[] | null;
+          actualMain: number[] | null;
+          hits: number | null;
+        } | null;
       }>(`/api/optimizer/apply/${runId}`, {}),
     runOptimizerDiagnostic: (body: {
       drawType: DrawType;

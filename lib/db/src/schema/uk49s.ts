@@ -142,6 +142,15 @@ export const uk49sOptimizerConfigs = pgTable("uk49s_optimizer_configs", {
   validationAvgHits: real("validation_avg_hits"),
   validationSampleSize: integer("validation_sample_size"),
   validationBoosterHitRate: real("validation_booster_hit_rate"),
+  // Best single-prediction hit count on the validation window
+  maxMainHits: integer("max_main_hits"),
+  // 4-hit evidence: a historical validation prediction that matched exactly 4
+  fourHitFound: boolean("four_hit_found").notNull().default(false),
+  fourHitCount: integer("four_hit_count").notNull().default(0),
+  fourHitDrawDate: text("four_hit_draw_date"),
+  fourHitPredictedMain: text("four_hit_predicted_main"),
+  fourHitActualMain: text("four_hit_actual_main"),
+  fourHitHits: integer("four_hit_hits"),
   // Stability metrics across multiple periods
   stabilityScore: real("stability_score"),
   // Random seed
@@ -177,6 +186,19 @@ export const uk49sOptimizerRuns = pgTable("uk49s_optimizer_runs", {
   currentIteration: integer("current_iteration").notNull().default(0),
   autoWindow: boolean("auto_window").notNull().default(false),
   errorMessage: text("error_message"),
+  // Search goal / stop conditions
+  maxConfigurations: integer("max_configurations"),
+  stopOnFourHit: boolean("stop_on_four_hit").notNull().default(false),
+  stoppedReason: text("stopped_reason"),
+  maxHits: integer("max_hits"),
+  // 4-hit target evidence (a real historical validation prediction vs actual draw)
+  fourHitFound: boolean("four_hit_found").notNull().default(false),
+  fourHitCount: integer("four_hit_count").notNull().default(0),
+  fourHitConfigId: integer("four_hit_config_id"),
+  fourHitDrawDate: text("four_hit_draw_date"),
+  fourHitPredictedMain: text("four_hit_predicted_main"),
+  fourHitActualMain: text("four_hit_actual_main"),
+  fourHitHits: integer("four_hit_hits"),
   bestConfigId: integer("best_config_id"),
   best4HitRate: real("best_4hit_rate"),
   bestAvgHits: real("best_avg_hits"),

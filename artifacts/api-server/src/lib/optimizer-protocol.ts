@@ -7,12 +7,15 @@ import type {
   FeatureWeights,
   OptimizerConfig,
   OptimizerResult,
+  OptimizerSearchOptions,
   Uk49sDraw,
 } from "@workspace/db/schema";
 
 export interface OptimizerWorkerInput {
   draws: Uk49sDraw[];
   optimizerConfig: OptimizerConfig;
+  /** Search control only: configuration cap and the 4-hit stop condition. */
+  searchOptions?: OptimizerSearchOptions;
 }
 
 export interface OptimizerWorkerProgressMessage {
@@ -30,6 +33,12 @@ export interface OptimizerWorkerProgressMessage {
   currentLookbackWindow: number;
   currentWeights: FeatureWeights;
   currentConstraints: DiversityConstraints;
+  /** Best single-prediction hit count seen so far. */
+  maxHits: number;
+  /** Configurations that produced at least one exact 4-hit prediction. */
+  fourHitCount: number;
+  /** Whether a valid 4-hit historical validation result has been found. */
+  fourHitFound: boolean;
 }
 
 export type OptimizerWorkerMessage =

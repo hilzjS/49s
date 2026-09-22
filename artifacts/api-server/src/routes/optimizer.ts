@@ -166,9 +166,11 @@ router.post(
   asyncHandler(async (req, res) => {
     const {
       drawType: rawDrawType,
+      maxConfigurations,
+      stopOnFourHit = true,
       maxIterations = 1000,
-      populationSize = 100,
-      eliteSize = 10,
+      populationSize,
+      eliteSize,
       mutationRate = 0.1,
       validationStartDate,
       validationEndDate,
@@ -186,6 +188,27 @@ router.post(
       res.status(400).json({ error: "drawType must be 'lunchtime' or 'teatime'" });
       return;
     }
+
+    /**
+     * Search size. The strategy itself is unchanged (random search over
+     * `populationSize` configurations, then hill climbing from the best
+     * `eliteSize`, each running 50 steps). Only the parameters are derived so a
+     * requested maximum is actually reachable, and the maximum is enforced as a
+     * hard cap so the search can never run indefinitely.
+     */
+    const requestedMax = Number(maxConfigurations);
+    const resolvedMaxConfigurations =
+      Number.isFinite(requestedMax) && requestedMax > 0 ? Math.min(Math.floor(requestedMax), 50_000) : 1_000;
+
+    const resolvedEliteSize = Number.isFinite(Number(eliteSize)) && Number(eliteSize) >= 0
+      ? Math.floor(Number(eliteSize))
+      : 10;
+
+    const requestedPopulation = Number(populationSize);
+    const resolvedPopulationSize =
+      Number.isFinite(requestedPopulation) && requestedPopulation > 0
+        ? Math.floor(requestedPopulation)
+        : Math.max(10, resolvedMaxConfigurations - resolvedEliteSize * 50);
 
     try {
       const draws = await loadDrawsForType(drawType);
@@ -222,8 +245,8 @@ router.post(
       const optimizerConfig: OptimizerConfig = {
         drawType,
         maxIterations,
-        populationSize,
-        eliteSize,
+        populationSize: resolvedPopulationSize,
+        eliteSize: resolvedEliteSize,
         mutationRate,
         trainStartDate: "",
         trainEndDate: "",
@@ -235,6 +258,17 @@ router.post(
         randomSeed,
       };
 
+      logger.info(
+        {
+          drawType,
+          maxConfigurations: resolvedMaxConfigurations,
+          stopOnFourHit: stopOnFourHit !== false,
+          populationSize: resolvedPopulationSize,
+          eliteSize: resolvedEliteSize,
+        },
+        "Optimizer search limits",
+      );
+
       const state = await startOptimizerJob({
         drawType,
         draws,
@@ -243,6 +277,8 @@ router.post(
         autoWindow: !useCustom,
         allowDuplicate: allowDuplicate === true,
         applyOnComplete: applyToModel === true,
+        maxConfigurations: resolvedMaxConfigurations,
+        stopOnFourHit: stopOnFourHit !== false,
       });
 
       res.status(202).json({
@@ -250,6 +286,7 @@ router.post(
         runId: state.runId,
         window,
         checks,
+        target: { hits: 4, maxConfigurations: resolvedMaxConfigurations, stopOnFourHit: stopOnFourHit !== false },
         job: state,
       });
     } catch (error) {
@@ -386,7 +423,12 @@ router.post(
         return;
       }
 
-      const bestConfigs = await db
+      /**
+       * Prefer the configuration that produced a genuine 4-hit validation
+       * result; among those (or when there is none) the existing selection
+       * criteria decide: highest 4-hit rate, then largest sample size.
+       */
+      const candidateConfigs = await db
         .select()
         .from(uk49sOptimizerConfigs)
         .where(
@@ -396,10 +438,14 @@ router.post(
             gt(uk49sOptimizerConfigs.validationSampleSize, 0),
           ),
         )
-        .orderBy(desc(uk49sOptimizerConfigs.validation4HitRate), desc(uk49sOptimizerConfigs.validationSampleSize))
+        .orderBy(
+          desc(uk49sOptimizerConfigs.fourHitFound),
+          desc(uk49sOptimizerConfigs.validation4HitRate),
+          desc(uk49sOptimizerConfigs.validationSampleSize),
+        )
         .limit(1);
 
-      const best = bestConfigs[0];
+      const best = candidateConfigs[0];
       if (!best) {
         res.status(409).json({
           success: false,
@@ -449,13 +495,22 @@ router.post(
         drawType: run.drawType,
         configId: best.id,
         newModelId: modelId,
+        fourHitFound: best.fourHitFound,
+        fourHit: best.fourHitFound
+          ? {
+              validationDrawDate: best.fourHitDrawDate,
+              predictedMain: best.fourHitPredictedMain ? (JSON.parse(best.fourHitPredictedMain) as number[]) : null,
+              actualMain: best.fourHitActualMain ? (JSON.parse(best.fourHitActualMain) as number[]) : null,
+              hits: best.fourHitHits,
+            }
+          : null,
         metrics: {
           fourHitRate: best.validation4HitRate,
           avgHits: best.validationAvgHits,
           sampleSize: best.validationSampleSize,
         },
         warning:
-          "The applied configuration performed best on historical validation data. The prediction algorithm is unchanged and future outcomes remain random.",
+          "4-hit configuration found in historical validation. The prediction algorithm is unchanged and future outcomes remain random.",
       });
     } catch (error) {
       logger.error({ error, runId }, "Failed to apply optimizer configuration");
@@ -601,6 +656,17 @@ router.get(
         configsTested: run.configsTested,
         configsFailed: run.configsFailed,
         totalConfigs: run.totalConfigs,
+        maxConfigurations: run.maxConfigurations,
+        stopOnFourHit: run.stopOnFourHit,
+        stoppedReason: run.stoppedReason,
+        maxHits: run.maxHits,
+        fourHitFound: run.fourHitFound,
+        fourHitCount: run.fourHitCount,
+        fourHitConfigId: run.fourHitConfigId,
+        fourHitDrawDate: run.fourHitDrawDate,
+        fourHitPredictedMain: run.fourHitPredictedMain,
+        fourHitActualMain: run.fourHitActualMain,
+        fourHitHits: run.fourHitHits,
         validationDrawCount: run.validationDrawCount,
         autoWindow: run.autoWindow,
         errorMessage: run.errorMessage,
@@ -651,6 +717,22 @@ router.get(
         validationDrawCount: run.validationDrawCount,
         autoWindow: run.autoWindow,
         errorMessage: run.errorMessage,
+        target: {
+          hits: 4,
+          maxConfigurations: run.maxConfigurations,
+          stopOnFourHit: run.stopOnFourHit,
+          stoppedReason: run.stoppedReason,
+        },
+        fourHit: {
+          found: run.fourHitFound,
+          count: run.fourHitCount,
+          configId: run.fourHitConfigId,
+          validationDrawDate: run.fourHitDrawDate,
+          predictedMain: run.fourHitPredictedMain ? (JSON.parse(run.fourHitPredictedMain) as number[]) : null,
+          actualMain: run.fourHitActualMain ? (JSON.parse(run.fourHitActualMain) as number[]) : null,
+          hits: run.fourHitHits,
+        },
+        maxHits: run.maxHits,
         parameters: {
           maxIterations: run.maxIterations,
           populationSize: run.populationSize,
