@@ -124,9 +124,10 @@ export default function SettingsPage() {
               <tr><th>Variable</th><th>Required</th><th>Purpose</th></tr>
             </thead>
             <tbody>
-              <tr><td className="type-cell">DATABASE_URL</td><td>Yes</td><td>PostgreSQL connection string (server-side only)</td></tr>
-              <tr><td className="type-cell">PORT</td><td>Yes</td><td>API server port</td></tr>
-              <tr><td className="type-cell">ADMIN_API_KEY</td><td>Recommended</td><td>Protects administrative endpoints</td></tr>
+              <tr><td className="type-cell">DATABASE_URL</td><td>Yes</td><td>Supabase PostgreSQL connection string (server-side only)</td></tr>
+                            <tr><td className="type-cell">DATABASE_SSL</td><td>Optional</td><td>TLS override; auto-enabled for non-local hosts</td></tr>
+                            <tr><td className="type-cell">PORT</td><td>Yes</td><td>API server port</td></tr>
+                            <tr><td className="type-cell">ADMIN_API_KEY</td><td>Recommended</td><td>Protects administrative endpoints</td></tr>
             </tbody>
           </table>
           <div className="warning-banner" style={{ marginTop: 16, marginBottom: 0 }}>

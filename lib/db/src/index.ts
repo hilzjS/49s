@@ -7,6 +7,58 @@ const { Pool } = pg;
 let poolInstance: pg.Pool | undefined;
 let dbInstance: NodePgDatabase<typeof schema> | undefined;
 
+/**
+ * Supabase (and most managed PostgreSQL providers) require TLS. `pg` only
+ * enables TLS when told to, so we resolve an explicit SSL configuration from
+ * the connection string.
+ *
+ * The `sslmode` parameter is stripped from the string before it is handed to
+ * `pg` because `pg-connection-string` maps `sslmode=require` to strict
+ * certificate verification, which fails against Supabase's pooled endpoints.
+ * We instead control TLS via the `ssl` option below.
+ *
+ * Credentials themselves never leave the server: only the value read from
+ * `DATABASE_URL` is used here, and it is never returned to clients.
+ */
+function resolveConnection(connectionString: string): {
+  connectionString: string;
+  ssl: pg.PoolConfig["ssl"];
+} {
+  const sslmodeMatch = connectionString.match(/[?&]sslmode=([^&]*)/i);
+  const sslmode = sslmodeMatch ? decodeURIComponent(sslmodeMatch[1]).toLowerCase() : null;
+
+  // Remove the sslmode parameter without disturbing the rest of the URL
+  // (avoids re-encoding passwords that contain reserved characters).
+  let clean = connectionString;
+  if (sslmodeMatch) {
+    clean = clean
+      .replace(/[?&]sslmode=[^&]*/i, "")
+      .replace(/[?&]$/, "")
+      .replace(/\?&/, "?");
+  }
+
+  const override = (process.env.DATABASE_SSL ?? "").toLowerCase();
+
+  // Explicit opt-out wins for local development databases.
+  if (override === "false" || override === "disable" || sslmode === "disable") {
+    return { connectionString: clean, ssl: false };
+  }
+
+  let host = "";
+  try {
+    host = new URL(clean).hostname;
+  } catch {
+    // Non-URL connection strings are passed through untouched.
+  }
+
+  const isLocal = host === "localhost" || host === "127.0.0.1" || host === "::1";
+  if (isLocal) {
+    return { connectionString: clean, ssl: false };
+  }
+
+  return { connectionString: clean, ssl: { rejectUnauthorized: false } };
+}
+
 function getPool(): pg.Pool {
   if (!poolInstance) {
     const connectionString = process.env.DATABASE_URL;
@@ -17,7 +69,8 @@ function getPool(): pg.Pool {
       );
     }
 
-    poolInstance = new Pool({ connectionString });
+    const connection = resolveConnection(connectionString);
+    poolInstance = new Pool(connection);
   }
 
   return poolInstance;

@@ -56,13 +56,13 @@ honest comparison.
 # 1. Install dependencies (pnpm required)
 pnpm install
 
-# 2. Provision PostgreSQL and set env vars
-export DATABASE_URL="postgresql://user:password@localhost:5432/uk49s"
+# 2. Set env vars (server-side only)
+export DATABASE_URL="<NEW_SUPABASE_DATABASE_URL>"
 export ADMIN_API_KEY="choose-a-strong-key"   # protects admin endpoints
 export PORT=3000
 
-# 3. Create database schema
-pnpm run db:generate   # or: pnpm --filter @workspace/db run push
+# 3. Create the database schema (from scratch)
+pnpm run db:init   # applies lib/db/migrations/0000_uk49s_schema.sql
 
 # 4. Start the API server
 pnpm run dev:api
@@ -71,10 +71,33 @@ pnpm run dev:api
 pnpm run dev:scraper
 ```
 
+## Using a NEW Supabase PostgreSQL database
+
+The application talks to PostgreSQL directly (Drizzle ORM + `pg`) using the
+server-side `DATABASE_URL`. There is no Supabase client SDK and no anon/service
+key in the app — the only credential required is the database connection string,
+and it never reaches the browser.
+
+1. Create a new project in Supabase.
+2. Copy the connection string from **Project Settings → Database → Connection
+   string (URI)**. Use the **Connection pooling (Supavisor)** URI (port `6543`,
+   recommended) or the direct connection URI (port `5432`).
+3. Set it as the server-side `DATABASE_URL` (in Dyad, add it as an app
+   environment variable / secret — do not commit it).
+4. Create the schema: `pnpm run db:init` (or `pnpm --filter @workspace/db run push`).
+5. Populate fresh data: run the initial scrape (see below). The scraper is
+   idempotent — running it again will not create duplicate draws.
+
+TLS is enabled automatically for non-localhost hosts. `DATABASE_URL` and
+`ADMIN_API_KEY` are read only on the server; no passwords, service-role keys,
+API keys, or connection strings are exposed to the frontend.
+
 ## Commands
 
 | Script | Purpose |
 |---|---|
+| `pnpm run db:init` | Create schema from scratch (`lib/db/migrations/0000_uk49s_schema.sql`) |
+| `pnpm run db:push` | Alternative: sync schema via drizzle-kit push |
 | `pnpm run scrape:uk49s` | Scrape + ingest 2015 (verification year) |
 | `pnpm run ingest:uk49s` | Ingest full history 2015–present (idempotent) |
 | `pnpm run backtest:uk49s` | Walk-forward backtest (Lunchtime, 2024) |
