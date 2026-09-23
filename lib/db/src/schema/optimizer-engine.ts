@@ -379,14 +379,46 @@ export function optimizeModel(
     }
 
     return stopOnFourHit && targetFound;
-  };
-
-  // Phase 1: Random Search
-  for (let i = 0; i < optimizerConfig.populationSize; i++) {
-    if (evaluated >= maxConfigurations) {
-      stoppedReason = "max-configurations-reached";
-      break;
-    }
+      };
+    
+      /**
+       * The strategy's built-in default configuration is always evaluated first, so
+       * the search can never return a result worse than the shipped defaults (for
+       * the hybrid strategy that is the 0.5 / 0.3 / 0.2 weighting). This also makes
+       * the "did optimization actually help?" comparison meaningful.
+       */
+      const baselineConfig: SearchConfig = {
+        weights: baseWeightsFor(strategy),
+        constraints: { enforceDiversity: true, minNumberSpread: 10, maxSameGroup: 2 },
+        lookbackWindow: strategy === "hybrid" ? 30 : 90,
+        poolSize: DEFAULT_HYBRID_POOL_SIZE,
+      };
+    
+      {
+        const baselineSeed = optimizerConfig.randomSeed ?? 1;
+        const baselineResult = evaluateConfig(draws, baselineConfig, optimizerConfig, baselineSeed, strategy);
+        const stop = recordResult(baselineResult);
+    
+        progressCallback?.({
+          iteration: 0,
+          bestScore,
+          bestResult,
+          current: baselineConfig,
+          phase: "random-search",
+          maxHits,
+          fourHitCount: fourHitResults.length,
+          fourHitFound: targetFound,
+        });
+    
+        if (stop) stoppedReason = "four-hit-found";
+      }
+    
+      // Phase 1: Random Search (skipped if the baseline already met the target)
+      for (let i = 0; i < optimizerConfig.populationSize && stoppedReason !== "four-hit-found"; i++) {
+        if (evaluated >= maxConfigurations) {
+          stoppedReason = "max-configurations-reached";
+          break;
+        }
 
     // Keep seeds within Postgres int4 range
     const seed = optimizerConfig.randomSeed ? optimizerConfig.randomSeed + i : (1 + i * 7919) % 2147483647;
