@@ -197,6 +197,33 @@ export const PREDICTION_STRATEGY_OPTIONS: { value: PredictionStrategy; label: st
   },
 ];
 
+/** One engine's walk-forward result in the automatic engine showdown. */
+export interface EngineEvaluation {
+  strategy: PredictionStrategy;
+  label: string;
+  liveConfig: boolean;
+  lookbackWindow: number;
+  poolSize: number;
+  totalPredictions: number;
+  fourHitCount: number;
+  fourHitRate: number;
+  avgMainHits: number;
+  boosterHitRate: number;
+}
+
+/** Both engines evaluated after a draw; the winner predicts the next draw. */
+export interface ShowdownResult {
+  drawType: DrawType;
+  evaluatedAt: string;
+  latestDrawDate: string;
+  window: { startDate: string; endDate: string; drawCount: number };
+  evaluations: EngineEvaluation[];
+  champion: PredictionStrategy;
+  winner: PredictionStrategy;
+  promoted: boolean;
+  detail: string;
+}
+
 /** A historical validation prediction that matched exactly four numbers. */
 export interface FourHitRecord {
   validationDrawDate: string;
@@ -393,7 +420,9 @@ export const api = {
         `/api/predictions/history/${drawType}?limit=${limit}`,
       ),
   getActiveModel: (drawType: DrawType) =>
-    get<{ success: boolean; model: ModelInfo }>(`/api/predictions/model/${drawType}`),
+      get<{ success: boolean; model: ModelInfo }>(`/api/predictions/model/${drawType}`),
+    getEngineShowdown: (drawType: DrawType) =>
+      get<{ success: boolean; showdown: ShowdownResult }>(`/api/predictions/showdown/${drawType}`),
   getModelHistory: (drawType: DrawType) =>
     get<{ success: boolean; count: number; models: ModelInfo[] }>(
       `/api/predictions/model/${drawType}/history`,

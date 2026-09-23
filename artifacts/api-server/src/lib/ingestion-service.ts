@@ -351,14 +351,15 @@ export async function getLatestDraws(
   limit = 10
 ): Promise<typeof uk49sDraws.$inferSelect[]> {
   const rows = await db
-    .select()
-    .from(uk49sDraws)
-    .where(eq(uk49sDraws.drawType, drawType))
-    .orderBy(desc(uk49sDraws.drawDate))
-    .limit(limit);
-  // Return chronological order for display
-  return rows.reverse();
-}
+      .select()
+      .from(uk49sDraws)
+      .where(eq(uk49sDraws.drawType, drawType))
+      .orderBy(desc(uk49sDraws.drawDate))
+      .limit(limit);
+    // Newest first: callers treat index 0 as the latest draw ("Latest results").
+    // Consumers that need chronological order sort the rows themselves.
+    return rows;
+  }
 
 // Get draws in date range
 export async function getDrawsInRange(

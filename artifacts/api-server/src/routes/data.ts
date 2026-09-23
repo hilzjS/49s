@@ -16,6 +16,7 @@ import {
   type IngestionResult,
   type FullIngestionResult,
 } from "../lib/ingestion-service";
+import { runPredictionCycle } from "../lib/auto-predictions";
 import { db } from "@workspace/db";
 import { uk49sDraws, uk49sScrapeRuns } from "@workspace/db/schema";
 import { eq, and, count, desc, asc } from "drizzle-orm";
@@ -91,8 +92,14 @@ router.post("/ingest", requireAdmin, async (req, res) => {
     } else if (startYear && endYear) {
       result = await ingestYearRange(startYear, endYear, drawType === "both" ? undefined : drawType, forceRefresh);
     } else if (drawType === "latest") {
-      result = await updateLatestDraws();
-    } else {
+          result = await updateLatestDraws();
+          // A newly recorded draw is acted on immediately: run both engines, pick
+          // the winner and produce the next prediction (fire-and-forget so the
+          // ingestion response is not blocked).
+          void runPredictionCycle().catch((error: unknown) => {
+            logger.error({ error }, "Post-ingestion prediction cycle failed");
+          });
+        } else {
       // Ingest all from 2015
       result = await ingestAllYears(forceRefresh);
     }

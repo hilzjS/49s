@@ -13,6 +13,7 @@ import {
   getModelHistory,
   getNextPredictionDate,
 } from "../lib/prediction-service";
+import { getLastShowdown, runStrategyShowdown } from "../lib/strategy-showdown";
 import { logger } from "../lib/logger";
 import { requireAdmin } from "../lib/admin-auth";
 import { getStatsCutoff } from "../lib/stats-scope";
@@ -101,6 +102,28 @@ router.get("/model/:drawType/history", async (req: Request, res: Response) => {
   } catch (error) {
     logger.error({ error, drawType }, "Failed to get model history");
     res.status(500).json({ success: false, error: "Failed to get model history" });
+  }
+});
+
+// Engine showdown: both engines evaluated, winner picked for the next draw
+router.get("/showdown/:drawType", async (req: Request, res: Response) => {
+  const drawType = String(req.params.drawType);
+  if (!validDrawType(drawType)) {
+    res.status(400).json({ error: "drawType must be 'lunchtime' or 'teatime'" });
+    return;
+  }
+
+  try {
+    // Cached result unless a newer draw has been recorded since the last run.
+    const showdown = getLastShowdown(drawType) ?? (await runStrategyShowdown(drawType));
+
+    res.json({ success: true, showdown });
+  } catch (error) {
+    logger.error({ error, drawType }, "Failed to run the engine showdown");
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Engine showdown failed",
+    });
   }
 });
 
