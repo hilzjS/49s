@@ -27,11 +27,21 @@ export interface FeatureWeights {
   weightRepeat: number;
   weightFirst3Minus2: number;
   /**
-   * Booster-ball influence. Only used by the selectable "hybrid" strategy
-   * (see hybrid-strategy.ts); the 13-feature SuperHybrid engine ignores it.
-   */
-  weightBonusInfluence: number;
-}
+     * Booster-ball influence. Only used by the selectable "hybrid" strategy
+     * (see hybrid-strategy.ts); the other engines ignore it.
+     */
+    weightBonusInfluence: number;
+    /**
+     * 5/10/20-draw weighted appearance trend. Only used by the selectable
+     * "superhybrid3" strategy (see superhybrid3-strategy.ts).
+     */
+    weightMomentum: number;
+    /**
+     * Activity of the numbers either side of a number. Only used by the
+     * "superhybrid3" strategy.
+     */
+    weightNeighbour: number;
+  }
 
 // Default weights for SuperHybrid strategy
 export const DEFAULT_WEIGHTS: FeatureWeights = {
@@ -48,8 +58,10 @@ export const DEFAULT_WEIGHTS: FeatureWeights = {
   weightPositional: 1.5,
   weightRepeat: 1.0,
   weightFirst3Minus2: 1.5,
-  weightBonusInfluence: 0.0,
-};
+    weightBonusInfluence: 0.0,
+    weightMomentum: 0.0,
+    weightNeighbour: 0.0,
+  };
 
 // Feature result structure
 export interface NumberFeatureScores {

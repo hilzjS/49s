@@ -28,12 +28,17 @@ import { drawToNumbers } from "./uk49s";
 import { DEFAULT_WEIGHTS, type FeatureWeights } from "./feature-engine";
 
 /** The selectable prediction strategies. */
-export type PredictionStrategy = "superhybrid" | "hybrid";
+export type PredictionStrategy = "superhybrid" | "hybrid" | "superhybrid3";
 
-export const PREDICTION_STRATEGIES: readonly PredictionStrategy[] = ["superhybrid", "hybrid"];
+/** Every engine the platform can run, in showdown comparison order. */
+export const PREDICTION_STRATEGIES: readonly PredictionStrategy[] = [
+  "superhybrid",
+  "hybrid",
+  "superhybrid3",
+];
 
 export function isPredictionStrategy(value: unknown): value is PredictionStrategy {
-  return value === "superhybrid" || value === "hybrid";
+  return PREDICTION_STRATEGIES.includes(value as PredictionStrategy);
 }
 
 /** Default Super Hybrid weights: frequency 0.5, gap 0.3, bonus-influence 0.2. */
@@ -54,6 +59,34 @@ export const DEFAULT_HYBRID_WEIGHTS: FeatureWeights = {
   weightFirst3Minus2: 0,
   weightBonusInfluence: 0.2,
 };
+
+/** Shipped defaults for the third engine (see superhybrid3-strategy.ts). */
+export const DEFAULT_V3_WEIGHTS: FeatureWeights = {
+  ...DEFAULT_WEIGHTS,
+  weightFrequency: 3.0,
+  weightRecency: 0.35,
+  weightHotCold: 1.5,
+  weightGapAnalysis: 2.0,
+  weightPairs: 0,
+  weightTriples: 0,
+  weightConsecutive: 0,
+  weightOddEven: 0,
+  weightLowHigh: 0,
+  weightSumRange: 0,
+  weightPositional: 0,
+  weightRepeat: 0,
+  weightFirst3Minus2: 0,
+  weightBonusInfluence: 0,
+  weightMomentum: 1.5,
+  weightNeighbour: 1.2,
+};
+
+/** The shipped weights of each engine — what a fresh model starts from. */
+export function defaultWeightsForStrategy(strategy: PredictionStrategy): FeatureWeights {
+  if (strategy === "hybrid") return { ...DEFAULT_HYBRID_WEIGHTS };
+  if (strategy === "superhybrid3") return { ...DEFAULT_V3_WEIGHTS };
+  return { ...DEFAULT_WEIGHTS };
+}
 
 /** Size of the "hybrid pool" the main numbers are drawn from. */
 export const DEFAULT_HYBRID_POOL_SIZE = 10;

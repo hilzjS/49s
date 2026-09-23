@@ -96,9 +96,13 @@ export const uk49sModelConfigs = pgTable("uk49s_model_configs", {
   weightRepeat: real("weight_repeat").notNull().default(1.0),
   weightFirst3Minus2: real("weight_first3_minus2").notNull().default(1.0),
   // Booster-ball influence weight (hybrid strategy only)
-  weightBonusInfluence: real("weight_bonus_influence").notNull().default(0),
-  // Lookback window for training
-  lookbackWindow: integer("lookback_window").notNull().default(90),
+    weightBonusInfluence: real("weight_bonus_influence").notNull().default(0),
+    // 5/10/20-draw weighted appearance trend (superhybrid3 strategy only)
+    weightMomentum: real("weight_momentum").notNull().default(0),
+    // Activity of the numbers either side of a number (superhybrid3 strategy only)
+    weightNeighbour: real("weight_neighbour").notNull().default(0),
+    // Lookback window for training
+    lookbackWindow: integer("lookback_window").notNull().default(90),
   // Diversity/balance constraints
   enforceDiversity: boolean("enforce_diversity").notNull().default(true),
   minNumberSpread: integer("min_number_spread").notNull().default(10),
@@ -144,8 +148,12 @@ export const uk49sOptimizerConfigs = pgTable("uk49s_optimizer_configs", {
   weightRepeat: real("weight_repeat").notNull(),
   weightFirst3Minus2: real("weight_first3_minus2").notNull(),
   // Booster-ball influence weight (hybrid strategy only)
-  weightBonusInfluence: real("weight_bonus_influence").notNull().default(0),
-  lookbackWindow: integer("lookback_window").notNull(),
+    weightBonusInfluence: real("weight_bonus_influence").notNull().default(0),
+    // 5/10/20-draw weighted appearance trend (superhybrid3 strategy only)
+    weightMomentum: real("weight_momentum").notNull().default(0),
+    // Activity of the numbers either side of a number (superhybrid3 strategy only)
+    weightNeighbour: real("weight_neighbour").notNull().default(0),
+    lookbackWindow: integer("lookback_window").notNull(),
   enforceDiversity: boolean("enforce_diversity").notNull(),
   minNumberSpread: integer("min_number_spread").notNull(),
   maxSameGroup: integer("max_same_group").notNull(),

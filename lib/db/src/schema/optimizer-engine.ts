@@ -13,8 +13,10 @@ import {
   DEFAULT_HYBRID_WEIGHTS,
   HYBRID_LOOKBACK_OPTIONS,
   HYBRID_POOL_OPTIONS,
+  defaultWeightsForStrategy,
   type PredictionStrategy,
 } from "./hybrid-strategy";
+import { V3_CANDIDATE_POOL_SIZE, V3_LOOKBACK_OPTIONS, V3_POOL_OPTIONS } from "./superhybrid3-strategy";
 
 export interface OptimizerConfig {
   drawType: DrawType;
@@ -155,15 +157,19 @@ const HYBRID_WEIGHT_KEYS: (keyof FeatureWeights)[] = [
 ];
 
 function lookbackOptionsFor(strategy: PredictionStrategy): readonly number[] {
-  return strategy === "hybrid" ? HYBRID_LOOKBACK_OPTIONS : LOOKBACK_OPTIONS;
+  return strategy === "hybrid" ? HYBRID_LOOKBACK_OPTIONS : V3_LOOKBACK_OPTIONS;
 }
 
 function weightKeysFor(strategy: PredictionStrategy): (keyof FeatureWeights)[] {
-  return strategy === "hybrid" ? HYBRID_WEIGHT_KEYS : (Object.keys(DEFAULT_WEIGHTS) as (keyof FeatureWeights)[]);
+  if (strategy === "hybrid") return HYBRID_WEIGHT_KEYS;
+  if (strategy === "superhybrid3") return ["weightFrequency", "weightRecency", "weightGapAnalysis", "weightMomentum", "weightNeighbour"];
+  return Object.keys(DEFAULT_WEIGHTS) as (keyof FeatureWeights)[];
 }
 
 function baseWeightsFor(strategy: PredictionStrategy): FeatureWeights {
-  return strategy === "hybrid" ? { ...DEFAULT_HYBRID_WEIGHTS } : { ...DEFAULT_WEIGHTS };
+  if (strategy === "hybrid") return { ...DEFAULT_HYBRID_WEIGHTS };
+  if (strategy === "superhybrid3") return { ...DEFAULT_V3_WEIGHTS };
+  return { ...DEFAULT_WEIGHTS };
 }
 
 // Seeded random for reproducibility
@@ -213,7 +219,9 @@ function generateRandomConfig(rng: () => number, seed: number, strategy: Predict
   const poolSize =
     strategy === "hybrid"
       ? HYBRID_POOL_OPTIONS[randomInt(rng, 0, HYBRID_POOL_OPTIONS.length - 1)]
-      : DEFAULT_HYBRID_POOL_SIZE;
+      : strategy === "superhybrid3"
+        ? V3_POOL_OPTIONS[randomInt(rng, 0, V3_POOL_OPTIONS.length - 1)]
+        : DEFAULT_HYBRID_POOL_SIZE;
 
   return { weights, constraints, lookbackWindow, poolSize };
 }
@@ -250,11 +258,13 @@ function mutateConfig(config: SearchConfig, rng: () => number, mutationRate: num
       ? lookbackOptions[randomInt(rng, 0, lookbackOptions.length - 1)]
       : config.lookbackWindow;
 
-  // Occasionally change the hybrid pool size
+  // Occasionally change the pool size
   const poolSize =
     strategy === "hybrid" && rng() < mutationRate * 0.3
       ? HYBRID_POOL_OPTIONS[randomInt(rng, 0, HYBRID_POOL_OPTIONS.length - 1)]
-      : config.poolSize;
+      : strategy === "superhybrid3" && rng() < mutationRate * 0.3
+        ? V3_POOL_OPTIONS[randomInt(rng, 0, V3_POOL_OPTIONS.length - 1)]
+        : config.poolSize;
 
   return { weights: newWeights, constraints: newConstraints, lookbackWindow, poolSize };
 }
@@ -388,11 +398,11 @@ export function optimizeModel(
        * the "did optimization actually help?" comparison meaningful.
        */
       const baselineConfig: SearchConfig = {
-        weights: baseWeightsFor(strategy),
-        constraints: { enforceDiversity: true, minNumberSpread: 10, maxSameGroup: 2 },
-        lookbackWindow: strategy === "hybrid" ? 30 : 90,
-        poolSize: DEFAULT_HYBRID_POOL_SIZE,
-      };
+              weights: baseWeightsFor(strategy),
+              constraints: { enforceDiversity: true, minNumberSpread: 10, maxSameGroup: 2 },
+              lookbackWindow: strategy === "hybrid" ? 30 : strategy === "superhybrid3" ? 90 : 90,
+              poolSize: strategy === "hybrid" ? DEFAULT_HYBRID_POOL_SIZE : strategy === "superhybrid3" ? V3_CANDIDATE_POOL_SIZE : DEFAULT_HYBRID_POOL_SIZE,
+            };
     
       {
         const baselineSeed = optimizerConfig.randomSeed ?? 1;

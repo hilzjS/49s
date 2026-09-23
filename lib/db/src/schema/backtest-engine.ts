@@ -21,6 +21,11 @@ import {
   generateHybridPrediction,
   type PredictionStrategy,
 } from "./hybrid-strategy";
+import {
+  V3_CANDIDATE_POOL_SIZE,
+  generateSuperHybrid3Prediction,
+  type PreviousPrediction,
+} from "./superhybrid3-strategy";
 
 export interface BacktestConfig {
   drawType: DrawType;
@@ -116,14 +121,30 @@ export function generateStrategyPrediction(
   weights: FeatureWeights,
   constraints: DiversityConstraints,
   config: Pick<BacktestConfig, "strategy" | "lookbackWindow" | "poolSize">,
+  /**
+   * Predictions already made for EARLIER draws (newest first). Only the v3
+   * engine uses them, for its anti-repeat penalties; they are always strictly
+   * in the past, so no future information enters the decision.
+   */
+  previousPredictions: PreviousPrediction[] = [],
 ): { main: number[]; booster: number } {
-  if ((config.strategy ?? "superhybrid") === "hybrid") {
+  const strategy = config.strategy ?? "superhybrid";
+
+  if (strategy === "hybrid") {
     const prediction = generateHybridPrediction(
       trainingSet,
       weights,
       config.lookbackWindow,
       config.poolSize ?? DEFAULT_HYBRID_POOL_SIZE,
     );
+    return { main: prediction.mainNumbers, booster: prediction.boosterBall };
+  }
+
+  if (strategy === "superhybrid3") {
+    const prediction = generateSuperHybrid3Prediction(trainingSet, weights, config.lookbackWindow, {
+      previousPredictions,
+      candidatePoolSize: config.poolSize ?? V3_CANDIDATE_POOL_SIZE,
+    });
     return { main: prediction.mainNumbers, booster: prediction.boosterBall };
   }
 
@@ -165,7 +186,16 @@ export function runBacktest(
   
   const predictions: BacktestPrediction[] = [];
   
-  for (let targetIdx = testStartIdx; targetIdx < testEndIdx; targetIdx++) {
+    /**
+     * Predictions made for earlier target draws, newest first. The v3 engine
+     * penalises combinations it has already predicted recently, and in a
+     * walk-forward backtest those predictions are made in exactly the same order
+     * as in production, so the penalty is exercised realistically.
+     */
+    const previousPredictions: PreviousPrediction[] = [];
+    const PREVIOUS_PREDICTION_LIMIT = 25;
+  
+    for (let targetIdx = testStartIdx; targetIdx < testEndIdx; targetIdx++) {
     const targetDraw = filteredDraws[targetIdx];
     
     // CRITICAL: Use ONLY draws strictly before the target draw for training
@@ -182,14 +212,18 @@ export function runBacktest(
     // Generate prediction with the selected strategy. Both branches use ONLY
     // the training set (draws strictly before the target draw).
     const { main: predictedMain, booster: predictedBooster } = generateStrategyPrediction(
-      trainingSet,
-      weights,
-      constraints,
-      config,
-    );
+          trainingSet,
+          weights,
+          constraints,
+          config,
+          previousPredictions,
+        );
     
-    // Get actual result
-    const actual = drawToNumbers(targetDraw);
+        previousPredictions.unshift({ main: predictedMain, bonus: predictedBooster });
+        if (previousPredictions.length > PREVIOUS_PREDICTION_LIMIT) previousPredictions.pop();
+    
+        // Get actual result
+        const actual = drawToNumbers(targetDraw);
     
     // Calculate hits
     const mainHits = predictedMain.filter(n => actual.main.includes(n)).length;

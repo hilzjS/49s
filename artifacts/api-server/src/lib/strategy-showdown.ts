@@ -25,6 +25,7 @@ import {
   DEFAULT_HYBRID_WEIGHTS,
   DEFAULT_HYBRID_POOL_SIZE,
   PREDICTION_STRATEGIES,
+  defaultWeightsForStrategy,
   runBacktest,
   type DrawType,
   type DiversityConstraints,
@@ -82,6 +83,7 @@ export interface ShowdownResult {
 export const STRATEGY_LABELS: Record<PredictionStrategy, string> = {
   superhybrid: "SuperHybrid (13 features)",
   hybrid: "Super Hybrid (Frequency · Gap · Bonus)",
+  superhybrid3: "SuperHybrid v3 (Overdue · Momentum · Neighbours)",
 };
 
 /** Last showdown per draw type, kept in memory for status endpoints/UI. */
@@ -113,7 +115,7 @@ function evaluateEngine(
   strategy: PredictionStrategy,
   live: { weights: FeatureWeights; lookbackWindow: number; poolSize: number; constraints: DiversityConstraints } | null,
 ): EngineRun {
-  const weights = live?.weights ?? (strategy === "hybrid" ? DEFAULT_HYBRID_WEIGHTS : DEFAULT_WEIGHTS);
+  const weights = live?.weights ?? defaultWeightsForStrategy(strategy);
   const lookbackWindow = live?.lookbackWindow ?? DEFAULT_LOOKBACK_WINDOW;
   const poolSize = live?.poolSize ?? DEFAULT_HYBRID_POOL_SIZE;
   const constraints = live?.constraints ?? DEFAULT_CONSTRAINTS;
