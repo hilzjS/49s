@@ -12,26 +12,25 @@
  *   - best 4-number combination from the top-15 candidate pool becomes
  *     the main numbers; the best non-main number becomes the booster.
  *
- * IMPORTANT: everything here is computed from draws strictly BEFORE the
- * target draw. The reference script scored numbers using the *next*
- * draw's numbers (future data leakage); that is deliberately NOT
- * reproduced.
+ * IMPORTANT: everything here is computed from draws strictly BEFORE the target
+ * draw. The reference script scored numbers using the *next* draw's numbers
+ * (future data leakage); that is deliberately NOT reproduced.
  *
- * As with the rest of the platform: these are historical statistical
- * patterns, NOT predictions of future outcomes.
+ * As with the rest of the platform: these are historical statistical patterns,
+ * NOT predictions of future outcomes.
  */
 
 import type { Uk49sDraw } from "./uk49s";
 import { drawToNumbers } from "./uk49s";
 import { DEFAULT_WEIGHTS, type FeatureWeights } from "./feature-engine";
-import { DEFAULT_V3_WEIGHTS, type PredictionStrategy } from "./hybrid-strategy";
+import type { PredictionStrategy } from "./hybrid-strategy";
 
 /** Shipped defaults for the v3 engine. */
 export const DEFAULT_V3_WEIGHTS: FeatureWeights = {
-  ...DEFAULT_HYBRID_WEIGHTS,
+  ...DEFAULT_WEIGHTS,
   weightFrequency: 3.0,
   weightRecency: 0.35,
-  weightHotCold: 1.5,
+  weightHotCold: 0,
   weightGapAnalysis: 2.0,
   weightPairs: 0,
   weightTriples: 0,
@@ -128,7 +127,7 @@ function overdue(n: number, history: UK49Draw[]): number {
    MOMENTUM
 ========================================================= */
 
-function momentum(n: number, history: UK49Draw[]): number {
+function momentum(n: number, history: UK49sDraw[]): number {
   const last5 = frequency(n, history, 5);
   const last10 = frequency(n, history, 10);
   const last20 = frequency(n, history, 20);
@@ -139,7 +138,7 @@ function momentum(n: number, history: UK49Draw[]): number {
    NEIGHBOUR ACTIVITY
 ========================================================= */
 
-function neighbourScore(n: number, history: UK49Draw[]): number {
+function neighbourScore(n: number, history: UK49sDraw[]): number {
   let score = 0;
   for (const draw of history.slice(0, 30)) {
     const nums = cleanNumbers(draw.numbers);
@@ -170,7 +169,7 @@ function repeatPenalty(n: number, previous: PreviousPrediction[], lookback = 12)
    NUMBER SCORE
 ========================================================= */
 
-function scoreNumber(n: number, history: UK49Draw[], previous: PreviousPrediction[]): NumberScore {
+function scoreNumber(n: number, history: UK49sDraw[], previous: PreviousPrediction[], weights: FeatureWeights): NumberScore {
   const freq = frequency(n, history, 50);
   const recent = recentScore(n, history, 20);
   const due = overdue(n, history);
@@ -178,7 +177,13 @@ function scoreNumber(n: number, history: UK49Draw[], previous: PreviousPredictio
   const neighbour = neighbourScore(n, history);
   const penalty = repeatPenalty(n, previous);
 
-  const score = freq * 3 + recent * 0.35 + due * 2 + trend * 1.5 + neighbour * 1.2 - penalty;
+  const score =
+    freq * weights.weightFrequency +
+    recent * weights.weightRecency +
+    due * weights.weightGapAnalysis +
+    trend * weights.weightMomentum +
+    neighbour * weights.weightNeighbour -
+    penalty;
 
   return { n, score, frequency: freq, recent, overdue: due, momentum: trend, neighbour };
 }
@@ -187,10 +192,10 @@ function scoreNumber(n: number, history: UK49Draw[], previous: PreviousPredictio
    CANDIDATE POOL
 ========================================================= */
 
-function buildCandidates(history: UK49Draw[], previous: PreviousPrediction[]): NumberScore[] {
+function buildCandidates(history: UK49sDraw[], previous: PreviousPrediction[], weights: FeatureWeights): NumberScore[] {
   const scores: NumberScore[] = [];
   for (let n = MIN; n <= MAX; n++) {
-    scores.push(scoreNumber(n, history, previous));
+    scores.push(scoreNumber(n, history, previous, weights));
   }
   return scores
     .sort((a, b) => b.score - a.score || a.n - b.n)
@@ -201,7 +206,7 @@ function buildCandidates(history: UK49Draw[], previous: PreviousPrediction[]): N
    HISTORICAL PAIR STRENGTH
 ========================================================= */
 
-function pairStrength(a: number, b: number, history: UK49Draw[]): number {
+function pairStrength(a: number, b: number, history: UK49sDraw[]): number {
   return history
     .slice(0, 100)
     .filter((draw) => {
@@ -214,7 +219,7 @@ function pairStrength(a: number, b: number, history: UK49Draw[]): number {
    HISTORICAL TRIPLE STRENGTH
 ========================================================= */
 
-function tripleStrength(a: number, b: number, c: number, history: UK49Draw[]): number {
+function tripleStrength(a: number, b: number, c: number, history: UK49sDraw[]): number {
   return history
     .slice(0, 100)
     .filter((draw) => {
@@ -320,13 +325,13 @@ function decadeScore(numbers: number[]): number {
 function scoreCombination(
   combination: number[],
   candidateMap: Map<number, NumberScore>,
-  history: UK49Draw[],
+  history: UK49sDraw[],
   previous: PreviousPrediction[],
 ): number {
   let score = 0;
 
   for (const n of combination) {
-    score += candidateMap.get(n)?.score || 0;
+    score += candidateMap.get(n)?.score ?? 0;
   }
 
   for (let i = 0; i < combination.length; i++) {
@@ -373,8 +378,8 @@ function generateCombinations(candidates: NumberScore[]): number[][] {
    MAIN 4-NUMBER PREDICTION
 ========================================================= */
 
-function predictMain(history: UK49Draw[], previous: PreviousPrediction[]) {
-  const candidates = buildCandidates(history, previous);
+function predictMain(history: UK49sDraw[], previous: PreviousPrediction[], weights: FeatureWeights) {
+  const candidates = buildCandidates(history, previous, weights);
   const candidateMap = new Map<number, NumberScore>();
   for (const candidate of candidates) {
     candidateMap.set(candidate.n, candidate);
@@ -401,7 +406,7 @@ function predictMain(history: UK49Draw[], previous: PreviousPrediction[]) {
    BONUS SCORE
 ========================================================= */
 
-function bonusScore(n: number, history: UK49Draw[], previous: PreviousPrediction[]): number {
+function bonusScore(n: number, history: UK49sDraw[], previous: PreviousPrediction[]): number {
   let score = 0;
 
   const bonusFrequency = history.slice(0, 50).filter((d) => Number(d.bonus) === n).length;
@@ -430,7 +435,7 @@ function bonusScore(n: number, history: UK49Draw[], previous: PreviousPrediction
    BONUS PREDICTION
 ========================================================= */
 
-function predictBonus(history: UK49Draw[], main: number[], previous: PreviousPrediction[]): number {
+function predictBonus(history: UK49sDraw[], main: number[], previous: PreviousPrediction[]): number {
   const candidates: { n: number; score: number }[] = [];
   for (let n = MIN; n <= MAX; n++) {
     if (main.includes(n)) {
@@ -452,12 +457,12 @@ function predictBonus(history: UK49Draw[], main: number[], previous: PreviousPre
    COMPLETE UK49s PREDICTION
 ========================================================= */
 
-export function predictUK49(history: UK49Draw[], previous: PreviousPrediction[] = []) {
+export function predictUK49(history: UK49sDraw[], previous: PreviousPrediction[] = []) {
   if (history.length < 10) {
     throw new Error("At least 10 historical UK49s draws are required.");
   }
 
-  const mainResult = predictMain(history, previous);
+  const mainResult = predictMain(history, previous, DEFAULT_V3_WEIGHTS);
   const bonus = predictBonus(history, mainResult.numbers, previous);
 
   return {
@@ -481,14 +486,14 @@ export function predictUK49(history: UK49Draw[], previous: PreviousPrediction[] 
    ENGINE ADAPTER (leakage-free, uses draws strictly before target)
 ========================================================= */
 
-/** UK49Draw shape used by the ported script. */
-interface UK49Draw {
+/** UK49Draw shape used by the ported script (newest first). */
+interface ScriptDraw {
   numbers: number[];
   bonus?: number;
 }
 
 /** Convert a stored draw to the script's history shape (newest first). */
-function toHistoryDraw(draw: Uk49sDraw): UK49Draw {
+function toScriptDraw(draw: Uk49sDraw): ScriptDraw {
   const { main, booster } = drawToNumbers(draw);
   return { numbers: main, bonus: booster };
 }
@@ -496,6 +501,8 @@ function toHistoryDraw(draw: Uk49sDraw): UK49Draw {
 /**
  * Generates a SuperHybrid v3 prediction from draws that are strictly
  * before the target draw. Returns exactly 4 main numbers and 1 booster.
+ *
+ * The `previousPredictions` array must be newest-first (most recent first).
  */
 export function generateSuperHybrid3Prediction(
   draws: Uk49sDraw[],
@@ -507,13 +514,13 @@ export function generateSuperHybrid3Prediction(
     throw new Error("No historical draws available for SuperHybrid v3 prediction");
   }
 
-  // The script assumes newest-first history; our stored draws are
-  // chronological, so reverse once at the boundary.
-  const history = [...draws].reverse().map(toHistoryDraw);
+  // The script assumes newest-first history; our stored draws are chronological,
+  // so reverse once at the boundary.
+  const history = [...draws].reverse().map(toScriptDraw);
   const previous = options.previousPredictions ?? [];
   const poolSize = options.candidatePoolSize ?? V3_CANDIDATE_POOL_SIZE;
 
-  const mainResult = predictMain(history, previous);
+  const mainResult = predictMain(history, previous, weights);
   const bonus = predictBonus(history, mainResult.numbers, previous);
 
   return {

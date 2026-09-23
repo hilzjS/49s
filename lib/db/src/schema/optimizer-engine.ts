@@ -11,6 +11,7 @@ import { runBacktest, type BacktestConfig, type BacktestResult } from "./backtes
 import {
   DEFAULT_HYBRID_POOL_SIZE,
   DEFAULT_HYBRID_WEIGHTS,
+  DEFAULT_V3_WEIGHTS,
   HYBRID_LOOKBACK_OPTIONS,
   HYBRID_POOL_OPTIONS,
   defaultWeightsForStrategy,

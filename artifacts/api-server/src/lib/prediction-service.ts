@@ -21,9 +21,11 @@ import {
   predictionToJson,
   generateHybridPrediction,
   hybridPredictionToJson,
+  generateSuperHybrid3Prediction,
   isPredictionStrategy,
   DEFAULT_WEIGHTS,
   DEFAULT_HYBRID_POOL_SIZE,
+  V3_CANDIDATE_POOL_SIZE,
   type FeatureWeights,
   type DiversityConstraints,
   type PredictionResult,
@@ -180,6 +182,8 @@ export async function getActiveModel(drawType: DrawType): Promise<ModelInfo | nu
       weightRepeat: m.weightRepeat,
       weightFirst3Minus2: m.weightFirst3Minus2,
       weightBonusInfluence: m.weightBonusInfluence,
+      weightMomentum: m.weightMomentum,
+      weightNeighbour: m.weightNeighbour,
     },
     lookbackWindow: m.lookbackWindow,
     constraints: {
@@ -240,6 +244,8 @@ export async function generateAndStorePrediction(
       weightRepeat: m.weightRepeat,
       weightFirst3Minus2: m.weightFirst3Minus2,
       weightBonusInfluence: m.weightBonusInfluence,
+      weightMomentum: m.weightMomentum,
+      weightNeighbour: m.weightNeighbour,
     };
     const strategy: PredictionStrategy = isPredictionStrategy(m.strategy) ? m.strategy : "superhybrid";
     const constraints: DiversityConstraints = {
@@ -298,6 +304,41 @@ export async function generateAndStorePrediction(
       componentScoresJson = JSON.stringify(hybridPredictionToJson(hybrid));
       const selected = hybrid.componentScores.filter((s) => mainNumbers.includes(s.number));
       overallScore = selected.length > 0 ? selected.reduce((sum, s) => sum + s.overallScore, 0) / selected.length : 0;
+    } else if (strategy === "superhybrid3") {
+      const previousPredictions = await db
+        .select()
+        .from(uk49sPredictions)
+        .where(eq(uk49sPredictions.drawType, drawType))
+        .where(eq(uk49sPredictions.trainingCutoff, trainingCutoff))
+        .orderBy(desc(uk49sPredictions.createdAt))
+        .limit(20)
+        .then((rows) => rows.map((p) => ({
+          main: [p.predictedMain1, p.predictedMain2, p.predictedMain3, p.predictedMain4],
+          bonus: p.predictedBooster,
+        })));
+
+      const v3 = generateSuperHybrid3Prediction(
+        draws,
+        weights,
+        m.lookbackWindow,
+        {
+          previousPredictions,
+          candidatePoolSize: m.poolSize,
+        }
+      );
+      mainNumbers = v3.mainNumbers;
+      boosterBall = v3.boosterBall;
+      trainingCutoff = draws[draws.length - 1].drawDate;
+      componentScoresJson = JSON.stringify({
+        strategy: "superhybrid3",
+        mainNumbers,
+        boosterBall,
+        score: v3.score,
+        candidatePool: v3.candidatePool,
+        trainingCutoff,
+      });
+      const selected = v3.candidatePool?.filter((c) => mainNumbers.includes(c.n)) ?? [];
+      overallScore = selected.length > 0 ? selected.reduce((sum, c) => sum + c.score, 0) / selected.length : 0;
     } else {
       const prediction: PredictionResult = generatePrediction(
         draws,
@@ -532,6 +573,8 @@ export async function updateActiveModel(
     weightRepeat: weights.weightRepeat,
     weightFirst3Minus2: weights.weightFirst3Minus2,
     weightBonusInfluence: weights.weightBonusInfluence,
+    weightMomentum: weights.weightMomentum,
+    weightNeighbour: weights.weightNeighbour,
     lookbackWindow,
     enforceDiversity: constraints.enforceDiversity,
     minNumberSpread: constraints.minNumberSpread,
@@ -575,6 +618,8 @@ export async function getModelHistory(drawType: DrawType): Promise<ModelInfo[]> 
       weightRepeat: m.weightRepeat,
       weightFirst3Minus2: m.weightFirst3Minus2,
       weightBonusInfluence: m.weightBonusInfluence,
+      weightMomentum: m.weightMomentum,
+      weightNeighbour: m.weightNeighbour,
     },
     lookbackWindow: m.lookbackWindow,
     constraints: {

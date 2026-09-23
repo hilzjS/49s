@@ -35,6 +35,8 @@ import {
 } from "@workspace/db/schema";
 import {
   DEFAULT_LOOKBACK_WINDOW,
+  V3_CANDIDATE_POOL_SIZE,
+  V3_LOOKBACK_OPTIONS,
   resolveValidationWindow,
   type ValidationWindow,
 } from "./optimizer-window";
@@ -116,8 +118,8 @@ function evaluateEngine(
   live: { weights: FeatureWeights; lookbackWindow: number; poolSize: number; constraints: DiversityConstraints } | null,
 ): EngineRun {
   const weights = live?.weights ?? defaultWeightsForStrategy(strategy);
-  const lookbackWindow = live?.lookbackWindow ?? DEFAULT_LOOKBACK_WINDOW;
-  const poolSize = live?.poolSize ?? DEFAULT_HYBRID_POOL_SIZE;
+  const lookbackWindow = live?.lookbackWindow ?? (strategy === "superhybrid3" ? V3_LOOKBACK_OPTIONS[0] : DEFAULT_LOOKBACK_WINDOW);
+  const poolSize = live?.poolSize ?? (strategy === "superhybrid3" ? V3_CANDIDATE_POOL_SIZE : DEFAULT_HYBRID_POOL_SIZE);
   const constraints = live?.constraints ?? DEFAULT_CONSTRAINTS;
 
   const result = runBacktest(
@@ -148,9 +150,9 @@ function evaluateEngine(
       poolSize,
       totalPredictions: result.totalPredictions,
       fourHitCount: result.fourHitCount,
-            fourHitRate: result.fourHitRate,
-            avgMainHits: result.avgMainHits,
-            boosterHitRate: result.boosterHitRate,
+      fourHitRate: result.fourHitRate,
+      avgMainHits: result.avgMainHits,
+      boosterHitRate: result.boosterHitRate,
     },
   };
 }
