@@ -67,6 +67,34 @@ export interface PredictionInfo {
   createdAt: Date;
 }
 
+// Add whole days to a YYYY-MM-DD date without any timezone shift.
+function addDaysIso(iso: string, days: number): string {
+  const [year, month, day] = iso.slice(0, 10).split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * The date of the next draw that has NOT yet been recorded for this draw type:
+ * the day immediately after the latest stored draw. Derived from the stored
+ * history rather than the wall clock so a prediction can never skip an undrawn
+ * (or not-yet-scraped) draw.
+ *
+ * Returns null when no draws of this type exist yet.
+ */
+export async function getNextPredictionDate(drawType: DrawType): Promise<string | null> {
+  const rows = await db
+    .select({ drawDate: uk49sDraws.drawDate })
+    .from(uk49sDraws)
+    .where(eq(uk49sDraws.drawType, drawType))
+    .orderBy(desc(uk49sDraws.drawDate))
+    .limit(1);
+
+  if (rows.length === 0) return null;
+  return addDaysIso(rows[0].drawDate, 1);
+}
+
 // Get or create default model config
 export async function getOrCreateDefaultModel(drawType: DrawType): Promise<number> {
   const existing = await db
@@ -226,11 +254,30 @@ export async function generateAndStorePrediction(
       .where(eq(uk49sDraws.drawType, drawType))
       .orderBy(uk49sDraws.drawDate);
 
-    const draws = allDraws.filter((d) => d.drawDate < predictionDate);
-
-    if (draws.length < m.lookbackWindow) {
-      return { success: false, error: `Not enough historical data before ${predictionDate}. Need ${m.lookbackWindow}, have ${draws.length}` };
-    }
+    const latestRecorded = allDraws.length > 0 ? allDraws[allDraws.length - 1].drawDate : null;
+    
+        if (!latestRecorded) {
+          return { success: false, error: `No ${drawType} draws recorded yet — nothing to train on` };
+        }
+    
+        /**
+         * Never predict past a draw whose result is not recorded yet. Otherwise the
+         * prediction would skip that draw and silently train on stale history (the
+         * defect where a 23 Sep prediction was produced before the 22 Sep draw).
+         */
+        const nextRecorded = addDaysIso(latestRecorded, 1);
+        if (predictionDate > nextRecorded) {
+          return {
+            success: false,
+            error: `Cannot generate a prediction for ${predictionDate}: the preceding ${drawType} draw (${nextRecorded}) has no recorded result yet. Record that draw first.`,
+          };
+        }
+    
+        const draws = allDraws.filter((d) => d.drawDate < predictionDate);
+    
+        if (draws.length < m.lookbackWindow) {
+          return { success: false, error: `Not enough historical data before ${predictionDate}. Need ${m.lookbackWindow}, have ${draws.length}` };
+        }
     
     // Generate prediction with the active model's strategy, using ONLY draws
     // strictly before the prediction date.

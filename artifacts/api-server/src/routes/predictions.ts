@@ -11,6 +11,7 @@ import {
   getPredictionHistory,
   getActiveModel,
   getModelHistory,
+  getNextPredictionDate,
 } from "../lib/prediction-service";
 import { logger } from "../lib/logger";
 import { requireAdmin } from "../lib/admin-auth";
@@ -41,12 +42,14 @@ router.get("/model/:drawType", async (req: Request, res: Response) => {
     res.json({
       success: true,
       model: {
-        id: model.id,
-        drawType: model.drawType,
-        version: model.version,
-        status: model.status,
-        weights: model.weights,
-        lookbackWindow: model.lookbackWindow,
+              id: model.id,
+              drawType: model.drawType,
+              version: model.version,
+              status: model.status,
+              strategy: model.strategy,
+              poolSize: model.poolSize,
+              weights: model.weights,
+              lookbackWindow: model.lookbackWindow,
         constraints: model.constraints,
         trainingCutoff: model.trainingCutoff,
         validationMetrics: model.validation4HitRate !== null ? {
@@ -79,11 +82,13 @@ router.get("/model/:drawType/history", async (req: Request, res: Response) => {
       success: true,
       count: history.length,
       models: history.map((m) => ({
-        id: m.id,
-        version: m.version,
-        status: m.status,
-        weights: m.weights,
-        lookbackWindow: m.lookbackWindow,
+              id: m.id,
+              version: m.version,
+              status: m.status,
+              strategy: m.strategy,
+              poolSize: m.poolSize,
+              weights: m.weights,
+              lookbackWindow: m.lookbackWindow,
         constraints: m.constraints,
         validationMetrics: m.validation4HitRate !== null ? {
           fourHitRate: m.validation4HitRate,
@@ -108,16 +113,24 @@ router.post("/generate", requireAdmin, async (req: Request, res: Response) => {
     return;
   }
 
-  // Default to tomorrow for prediction date
-  let targetDate: string;
-  if (typeof predictionDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(predictionDate)) {
-    targetDate = predictionDate;
-  } else {
-    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    targetDate = tomorrow.toISOString().slice(0, 10);
-  }
-
   try {
+      /**
+       * Default to the next draw that has not been recorded yet (the day after
+       * the latest stored draw) — NOT `now + 1 day`. Using the wall clock would
+       * let a prediction skip a draw whose result is not in yet (e.g. producing a
+       * 23 Sep prediction before the 22 Sep draw had happened).
+       */
+      let targetDate: string;
+      if (typeof predictionDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(predictionDate)) {
+        targetDate = predictionDate;
+      } else {
+        const nextDate = await getNextPredictionDate(drawType as "lunchtime" | "teatime");
+        if (!nextDate) {
+          res.status(400).json({ success: false, error: `No ${drawType} draws recorded yet — nothing to predict from.` });
+          return;
+        }
+        targetDate = nextDate;
+      }
     const result = await generateAndStorePrediction(drawType, targetDate);
 
     if (!result.success) {
