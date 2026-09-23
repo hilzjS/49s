@@ -2,6 +2,7 @@ import app from "./app";
 import { pool } from "@workspace/db";
 import { logger } from "./lib/logger";
 import { recoverInterruptedJobs, shutdownOptimizerJobs } from "./lib/optimizer-jobs";
+import { runDailyPredictionUpdate } from "./lib/auto-predictions";
 
 function resolvePortFromArgv(): string | undefined {
   const args = process.argv.slice(2);
@@ -76,6 +77,22 @@ async function verifyDatabaseConnection(): Promise<void> {
  */
 const OPTIMIZER_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
+/**
+ * How often the app refreshes its latest results and (re)generates the next
+ * prediction for each draw type. Runs shortly after boot and then hourly, so a
+ * prediction is always ready for the upcoming draw without any manual action.
+ */
+const AUTO_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
+const AUTO_UPDATE_INITIAL_DELAY_MS = 15 * 1000;
+
+function safeAutoUpdate(): void {
+  void runDailyPredictionUpdate().catch((error: unknown) => {
+    // A failed update must never become an unhandled rejection and take the API
+    // process down; it is retried on the next interval.
+    logger.error({ error }, "Automatic draw/prediction update failed");
+  });
+}
+
 async function recoverOrphanedOptimizerJobs(): Promise<void> {
   try {
     await recoverInterruptedJobs("Interrupted by server restart — the optimizer run did not finish");
@@ -94,13 +111,20 @@ app.listen(port, (err) => {
     void verifyDatabaseConnection().then(() => recoverOrphanedOptimizerJobs());
 
   const sweep = setInterval(() => {
-    void recoverInterruptedJobs("Optimizer run stalled — no progress was reported").catch((error: unknown) => {
-      // A failed sweep must never become an unhandled rejection: that would
-      // terminate the API process and take every endpoint down with it.
-      logger.error({ error }, "Optimizer stall sweep failed");
-    });
-  }, OPTIMIZER_SWEEP_INTERVAL_MS);
-  sweep.unref();
+      void recoverInterruptedJobs("Optimizer run stalled — no progress was reported").catch((error: unknown) => {
+        // A failed sweep must never become an unhandled rejection: that would
+        // terminate the API process and take every endpoint down with it.
+        logger.error({ error }, "Optimizer stall sweep failed");
+      });
+    }, OPTIMIZER_SWEEP_INTERVAL_MS);
+    sweep.unref();
+  
+    // Automatic results refresh + prediction generation for the upcoming draw.
+    const autoUpdate = setInterval(safeAutoUpdate, AUTO_UPDATE_INTERVAL_MS);
+    autoUpdate.unref();
+  
+    const autoUpdateInitial = setTimeout(safeAutoUpdate, AUTO_UPDATE_INITIAL_DELAY_MS);
+    autoUpdateInitial.unref();
 
   const shutdown = (signal: string): void => {
     logger.info({ signal }, "Shutting down");
