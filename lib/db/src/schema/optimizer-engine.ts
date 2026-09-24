@@ -11,13 +11,17 @@ import { runBacktest, type BacktestConfig, type BacktestResult } from "./backtes
 import {
   DEFAULT_HYBRID_POOL_SIZE,
   DEFAULT_HYBRID_WEIGHTS,
-  DEFAULT_V3_WEIGHTS,
   HYBRID_LOOKBACK_OPTIONS,
   HYBRID_POOL_OPTIONS,
   defaultWeightsForStrategy,
   type PredictionStrategy,
 } from "./hybrid-strategy";
-import { V3_CANDIDATE_POOL_SIZE, V3_LOOKBACK_OPTIONS, V3_POOL_OPTIONS } from "./superhybrid3-strategy";
+import {
+  DEFAULT_V3_WEIGHTS,
+  V3_CANDIDATE_POOL_SIZE,
+  V3_LOOKBACK_OPTIONS,
+  V3_POOL_OPTIONS,
+} from "./superhybrid3-strategy";
 
 export interface OptimizerConfig {
   drawType: DrawType;

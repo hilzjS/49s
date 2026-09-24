@@ -61,10 +61,14 @@ export default function AdminModels() {
               <div className="flex flex-wrap gap-2">
                               <Badge tone="mint">{model.status}</Badge>
                               <Badge tone="violet">
-                                {model.strategy === 'hybrid' ? 'Super Hybrid (Freq · Gap · Bonus)' : 'SuperHybrid (13 features)'}
+                                {model.strategy === 'hybrid'
+                                  ? 'Super Hybrid (Freq · Gap · Bonus)'
+                                  : model.strategy === 'superhybrid3'
+                                    ? 'SuperHybrid v3 (Overdue · Momentum · Neighbours)'
+                                    : 'SuperHybrid (13 features)'}
                               </Badge>
                               <Badge tone="sky">{model.lookbackWindow} draw lookback</Badge>
-                              {model.strategy === 'hybrid' ? <Badge>pool {model.poolSize ?? '—'}</Badge> : null}
+                              {model.strategy !== 'superhybrid' ? <Badge>pool {model.poolSize ?? '—'}</Badge> : null}
                               {model.trainingCutoff ? <Badge>cutoff {formatDate(model.trainingCutoff)}</Badge> : null}
                             </div>
 
@@ -139,7 +143,11 @@ export default function AdminModels() {
                     <tr key={item.id}>
                       <td className="strong mono">{item.version}</td>
                                             <td className="text-[11.5px] text-[var(--text-3)]">
-                                              {item.strategy === 'hybrid' ? 'Super Hybrid' : 'SuperHybrid'}
+                                              {item.strategy === 'hybrid'
+                                                ? 'Super Hybrid'
+                                                : item.strategy === 'superhybrid3'
+                                                  ? 'SuperHybrid v3'
+                                                  : 'SuperHybrid'}
                                             </td>
                                             <td>
                                               <Badge tone={item.status === 'active' ? 'mint' : 'neutral'}>{item.status}</Badge>

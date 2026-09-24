@@ -26,6 +26,7 @@
 import type { Uk49sDraw } from "./uk49s";
 import { drawToNumbers } from "./uk49s";
 import { DEFAULT_WEIGHTS, type FeatureWeights } from "./feature-engine";
+import { DEFAULT_V3_WEIGHTS } from "./superhybrid3-strategy";
 
 /** The selectable prediction strategies. */
 export type PredictionStrategy = "superhybrid" | "hybrid" | "superhybrid3";
@@ -60,26 +61,6 @@ export const DEFAULT_HYBRID_WEIGHTS: FeatureWeights = {
   weightBonusInfluence: 0.2,
 };
 
-/** Shipped defaults for the third engine (see superhybrid3-strategy.ts). */
-export const DEFAULT_V3_WEIGHTS: FeatureWeights = {
-  ...DEFAULT_WEIGHTS,
-  weightFrequency: 3.0,
-  weightRecency: 0.35,
-  weightHotCold: 1.5,
-  weightGapAnalysis: 2.0,
-  weightPairs: 0,
-  weightTriples: 0,
-  weightConsecutive: 0,
-  weightOddEven: 0,
-  weightLowHigh: 0,
-  weightSumRange: 0,
-  weightPositional: 0,
-  weightRepeat: 0,
-  weightFirst3Minus2: 0,
-  weightBonusInfluence: 0,
-  weightMomentum: 1.5,
-  weightNeighbour: 1.2,
-};
 
 /** The shipped weights of each engine — what a fresh model starts from. */
 export function defaultWeightsForStrategy(strategy: PredictionStrategy): FeatureWeights {

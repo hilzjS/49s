@@ -182,7 +182,7 @@ export interface BacktestHistoryItem {
 export type OptimizerStopReason = 'four-hit-found' | 'max-configurations-reached' | 'search-exhausted';
 
 /** Selectable prediction strategies the optimizer can search. */
-export type PredictionStrategy = 'superhybrid' | 'hybrid';
+export type PredictionStrategy = 'superhybrid' | 'hybrid' | 'superhybrid3';
 
 export const PREDICTION_STRATEGY_OPTIONS: { value: PredictionStrategy; label: string; hint: string }[] = [
   {
@@ -194,6 +194,11 @@ export const PREDICTION_STRATEGY_OPTIONS: { value: PredictionStrategy; label: st
     value: 'hybrid',
     label: 'Super Hybrid (Frequency · Gap · Bonus)',
     hint: 'Frequency 0.5 + gap 0.3 + booster-influence 0.2 → top-pool → best 4',
+  },
+  {
+    value: 'superhybrid3',
+    label: 'SuperHybrid v3 (Overdue · Momentum · Neighbours)',
+    hint: 'Overdue scoring + momentum + neighbour influence',
   },
 ];
 

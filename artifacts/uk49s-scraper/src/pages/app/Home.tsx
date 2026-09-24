@@ -44,6 +44,7 @@ interface ShowdownResponse {
 const ENGINE_SHORT: Record<PredictionStrategy, string> = {
   superhybrid: 'SuperHybrid',
   hybrid: 'Super Hybrid',
+  superhybrid3: 'SuperHybrid v3',
 };
 
 /**

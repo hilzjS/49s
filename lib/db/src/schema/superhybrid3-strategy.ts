@@ -24,6 +24,7 @@ import type { Uk49sDraw } from "./uk49s";
 import { drawToNumbers } from "./uk49s";
 import { DEFAULT_WEIGHTS, type FeatureWeights } from "./feature-engine";
 import type { PredictionStrategy } from "./hybrid-strategy";
+import type { UK49Draw } from "./uk49s";
 
 /** Shipped defaults for the v3 engine. */
 export const DEFAULT_V3_WEIGHTS: FeatureWeights = {
@@ -493,7 +494,7 @@ interface ScriptDraw {
 }
 
 /** Convert a stored draw to the script's history shape (newest first). */
-function toScriptDraw(draw: Uk49sDraw): ScriptDraw {
+function toScriptDraw(draw: UK49Draw): ScriptDraw {
   const { main, booster } = drawToNumbers(draw);
   return { numbers: main, bonus: booster };
 }
@@ -505,7 +506,7 @@ function toScriptDraw(draw: Uk49sDraw): ScriptDraw {
  * The `previousPredictions` array must be newest-first (most recent first).
  */
 export function generateSuperHybrid3Prediction(
-  draws: Uk49sDraw[],
+  draws: UK49Draw[],
   weights: FeatureWeights = DEFAULT_V3_WEIGHTS,
   lookbackWindow = 90,
   options: { previousPredictions?: PreviousPrediction[]; candidatePoolSize?: number } = {},

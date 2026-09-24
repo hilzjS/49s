@@ -35,11 +35,10 @@ import {
 } from "@workspace/db/schema";
 import {
   DEFAULT_LOOKBACK_WINDOW,
-  V3_CANDIDATE_POOL_SIZE,
-  V3_LOOKBACK_OPTIONS,
   resolveValidationWindow,
   type ValidationWindow,
 } from "./optimizer-window";
+import { V3_CANDIDATE_POOL_SIZE, V3_LOOKBACK_OPTIONS } from "../db/src/schema/superhybrid3-strategy";
 import { getActiveModel, updateActiveModel } from "./prediction-service";
 import { logger } from "./logger";
 

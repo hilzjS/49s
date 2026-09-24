@@ -52,12 +52,13 @@ router.post("/run", requireAdmin, async (req, res) => {
     }
     
     const config: BacktestConfig = {
-      drawType,
-      lookbackWindow: lookbackWindow || 90,
-      testStartDate,
-      testEndDate,
-      randomSeed,
-    };
+          drawType,
+          lookbackWindow: lookbackWindow || 90,
+          testStartDate,
+          testEndDate,
+          randomSeed,
+          strategy: req.body.strategy,
+        };
     
     const modelWeights: FeatureWeights = weights || DEFAULT_WEIGHTS;
     

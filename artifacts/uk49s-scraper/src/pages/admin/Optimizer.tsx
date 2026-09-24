@@ -657,7 +657,7 @@ export default function AdminOptimizer() {
           <div className="space-y-4 p-5">
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               <StatCard label="Started" value={<span className="text-[15px]">{formatDateTime(job.startedAt)}</span>} tone="violet" />
-              <StatCard label="Strategy" value={<span className="text-[15px]">{job.strategy === 'hybrid' ? 'Super Hybrid' : 'SuperHybrid'}</span>} tone="sky" />
+              <StatCard label="Strategy" value={<span className="text-[15px]">{job.strategy === 'hybrid' ? 'Super Hybrid' : job.strategy === 'superhybrid3' ? 'SuperHybrid v3' : 'SuperHybrid'}</span>} tone="sky" />
               <StatCard label="Configurations tested" value={job.configsTested} tone="violet" />
               <StatCard label="Configurations failed" value={job.configsFailed} tone="coral" />
               <StatCard label="Current best average" value={job.bestAvgHits != null ? job.bestAvgHits.toFixed(2) : '—'} tone="mint" />
@@ -819,7 +819,11 @@ export default function AdminOptimizer() {
                   <tr key={run.id}>
                     <td className="strong">{formatDateTime(run.startedAt ?? run.completedAt)}</td>
                     <td className="text-[11.5px] text-[var(--text-3)]">
-                      {run.strategy === 'hybrid' ? 'Super Hybrid' : 'SuperHybrid'}
+                      {run.strategy === 'hybrid'
+                        ? 'Super Hybrid'
+                        : run.strategy === 'superhybrid3'
+                          ? 'SuperHybrid v3'
+                          : 'SuperHybrid'}
                     </td>
                     <td>
                       <Badge tone={statusTone(run.status as OptimizerJobStatus)}>{run.status}</Badge>
