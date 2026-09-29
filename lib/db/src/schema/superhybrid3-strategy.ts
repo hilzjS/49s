@@ -90,8 +90,8 @@ function contains(numbers: number[], n: number): boolean {
    FREQUENCY
 ========================================================= */
 
-function frequency(n: number, history: UK49Draw[], window = 50): number {
-  return history.slice(0, window).filter((d) => contains(cleanNumbers(d.numbers), n)).length;
+function frequency(n: number, history: ScriptDraw[], window = 50): number {
+  return history.slice(0, window).filter((d) => contains(d.numbers, n)).length;
 }
 
 /* =========================================================

@@ -38,7 +38,7 @@ import {
   resolveValidationWindow,
   type ValidationWindow,
 } from "./optimizer-window";
-import { V3_CANDIDATE_POOL_SIZE, V3_LOOKBACK_OPTIONS } from "../db/src/schema/superhybrid3-strategy";
+import { V3_CANDIDATE_POOL_SIZE, V3_LOOKBACK_OPTIONS } from "@workspace/db/schema/superhybrid3-strategy";
 import { getActiveModel, updateActiveModel } from "./prediction-service";
 import { logger } from "./logger";
 
