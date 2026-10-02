@@ -153,6 +153,46 @@ export function generateStrategyPrediction(
   return { main, booster: selectBoosterBall(scores, main) };
 }
 
+/**
+ * Aggregate a walk-forward run's predictions into result statistics. Shared by
+ * the synchronous and cooperative-yielding backtest loops so both produce
+ * identical statistics for identical predictions.
+ */
+export function summarizePredictions(predictions: BacktestPrediction[]): BacktestResult {
+  const hitCounts = new Map<number, number>();
+  for (let i = 0; i <= 5; i++) hitCounts.set(i, 0);
+
+  for (const pred of predictions) {
+    hitCounts.set(pred.mainHits, (hitCounts.get(pred.mainHits) || 0) + 1);
+  }
+
+  const allHits = predictions.map(p => p.mainHits).sort((a, b) => a - b);
+  const avgMainHits = predictions.length > 0
+    ? predictions.reduce((sum, p) => sum + p.mainHits, 0) / predictions.length
+    : 0;
+  const medianMainHits = predictions.length > 0
+    ? allHits[Math.floor(allHits.length / 2)]
+    : 0;
+  const maxMainHits = predictions.length > 0
+    ? Math.max(...allHits)
+    : 0;
+  const fourHitCount = predictions.filter(p => p.fourPlusHit).length;
+  const boosterHitCount = predictions.filter(p => p.boosterHit).length;
+
+  return {
+    totalPredictions: predictions.length,
+    hitDistribution: Array.from(hitCounts.entries()).map(([hits, count]) => ({ hits, count })),
+    avgMainHits,
+    medianMainHits,
+    maxMainHits,
+    fourHitCount,
+    fourHitRate: predictions.length > 0 ? fourHitCount / predictions.length : 0,
+    boosterHitCount,
+    boosterHitRate: predictions.length > 0 ? boosterHitCount / predictions.length : 0,
+    predictions,
+  };
+}
+
 // Run single backtest with a specific model
 export function runBacktest(
   draws: Uk49sDraw[],
@@ -243,38 +283,94 @@ export function runBacktest(
   }
   
   // Calculate statistics
-  const hitCounts = new Map<number, number>();
-  for (let i = 0; i <= 5; i++) hitCounts.set(i, 0);
-  
-  for (const pred of predictions) {
-    hitCounts.set(pred.mainHits, (hitCounts.get(pred.mainHits) || 0) + 1);
+  return summarizePredictions(predictions);
+}
+
+/**
+ * Cooperative-yielding variant of `runBacktest`.
+ *
+ * It walks forward through the exact same draws, in the exact same order, with
+ * the exact same strategy, and produces IDENTICAL predictions and statistics.
+ * The only difference is that it yields to the event loop between target draws,
+ * so a long CPU-bound backtest cannot monopolise Node's single thread and leave
+ * the HTTP server unable to answer other requests (which is what made pages —
+ * e.g. Results — appear to "load forever" while a showdown or backtest ran).
+ */
+export async function runBacktestAsync(
+  draws: Uk49sDraw[],
+  config: BacktestConfig,
+  weights: FeatureWeights = DEFAULT_WEIGHTS,
+  constraints: DiversityConstraints = { enforceDiversity: true, minNumberSpread: 10, maxSameGroup: 2 }
+): Promise<BacktestResult> {
+  // Filter to draw type and sort chronologically
+  const filteredDraws = draws
+    .filter(d => d.drawType === config.drawType)
+    .sort((a, b) => a.drawDate.localeCompare(b.drawDate));
+
+  // Find test period indices
+  const testStartIdx = filteredDraws.findIndex(d => d.drawDate >= config.testStartDate);
+  const testEndIdx = filteredDraws.findIndex(d => d.drawDate > config.testEndDate);
+
+  if (testStartIdx === -1 || testEndIdx === -1) {
+    return createEmptyResult();
   }
-  
-  const allHits = predictions.map(p => p.mainHits).sort((a, b) => a - b);
-  const avgMainHits = predictions.length > 0
-    ? predictions.reduce((sum, p) => sum + p.mainHits, 0) / predictions.length
-    : 0;
-  const medianMainHits = predictions.length > 0
-    ? allHits[Math.floor(allHits.length / 2)]
-    : 0;
-  const maxMainHits = predictions.length > 0
-    ? Math.max(...allHits)
-    : 0;
-  const fourHitCount = predictions.filter(p => p.fourPlusHit).length;
-  const boosterHitCount = predictions.filter(p => p.boosterHit).length;
-  
-  return {
-    totalPredictions: predictions.length,
-    hitDistribution: Array.from(hitCounts.entries()).map(([hits, count]) => ({ hits, count })),
-    avgMainHits,
-    medianMainHits,
-    maxMainHits,
-    fourHitCount,
-    fourHitRate: predictions.length > 0 ? fourHitCount / predictions.length : 0,
-    boosterHitCount,
-    boosterHitRate: predictions.length > 0 ? boosterHitCount / predictions.length : 0,
-    predictions,
-  };
+
+  const predictions: BacktestPrediction[] = [];
+
+  /**
+   * Predictions made for earlier target draws, newest first. The v3 engine
+   * penalises combinations it has already predicted recently, and in a
+   * walk-forward backtest those predictions are made in exactly the same order
+   * as in production, so the penalty is exercised realistically.
+   */
+  const previousPredictions: PreviousPrediction[] = [];
+  const PREVIOUS_PREDICTION_LIMIT = 25;
+
+  for (let targetIdx = testStartIdx; targetIdx < testEndIdx; targetIdx++) {
+    const targetDraw = filteredDraws[targetIdx];
+
+    // CRITICAL: Use ONLY draws strictly before the target draw for training
+    const trainingDraws = filteredDraws.slice(0, targetIdx);
+
+    if (trainingDraws.length < config.lookbackWindow) {
+      continue; // Not enough training data
+    }
+
+    const trainingSet = trainingDraws.slice(-config.lookbackWindow);
+    const trainingCutoff = trainingSet[trainingSet.length - 1].drawDate;
+
+    const { main: predictedMain, booster: predictedBooster } = generateStrategyPrediction(
+      trainingSet,
+      weights,
+      constraints,
+      config,
+      previousPredictions,
+    );
+
+    previousPredictions.unshift({ main: predictedMain, bonus: predictedBooster });
+    if (previousPredictions.length > PREVIOUS_PREDICTION_LIMIT) previousPredictions.pop();
+
+    const actual = drawToNumbers(targetDraw);
+    const mainHits = predictedMain.filter(n => actual.main.includes(n)).length;
+    const boosterHit = predictedBooster === actual.booster;
+
+    predictions.push({
+      predictionDate: targetDraw.drawDate,
+      trainingCutoff,
+      predictedMain,
+      predictedBooster,
+      actualMain: actual.main,
+      actualBooster: actual.booster,
+      mainHits,
+      boosterHit,
+      fourPlusHit: mainHits >= 4,
+    });
+
+    // Yield so pending HTTP requests are handled during a long run.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  return summarizePredictions(predictions);
 }
 
 // Run baseline backtests for comparison

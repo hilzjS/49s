@@ -26,7 +26,7 @@ import {
   DEFAULT_HYBRID_POOL_SIZE,
   PREDICTION_STRATEGIES,
   defaultWeightsForStrategy,
-  runBacktest,
+  runBacktestAsync,
   V3_CANDIDATE_POOL_SIZE,
   V3_LOOKBACK_OPTIONS,
   type DrawType,
@@ -110,19 +110,19 @@ interface EngineRun {
   constraints: DiversityConstraints;
 }
 
-function evaluateEngine(
+async function evaluateEngine(
   draws: Uk49sDraw[],
   drawType: DrawType,
   window: ValidationWindow,
   strategy: PredictionStrategy,
   live: { weights: FeatureWeights; lookbackWindow: number; poolSize: number; constraints: DiversityConstraints } | null,
-): EngineRun {
+): Promise<EngineRun> {
   const weights = live?.weights ?? defaultWeightsForStrategy(strategy);
   const lookbackWindow = live?.lookbackWindow ?? (strategy === "superhybrid3" ? V3_LOOKBACK_OPTIONS[0] : DEFAULT_LOOKBACK_WINDOW);
   const poolSize = live?.poolSize ?? (strategy === "superhybrid3" ? V3_CANDIDATE_POOL_SIZE : DEFAULT_HYBRID_POOL_SIZE);
   const constraints = live?.constraints ?? DEFAULT_CONSTRAINTS;
 
-  const result = runBacktest(
+  const result = await runBacktestAsync(
     draws,
     {
       drawType,
@@ -189,20 +189,22 @@ export async function runStrategyShowdown(
   const activeModel = await getActiveModel(drawType);
   const champion: PredictionStrategy = activeModel?.strategy ?? "superhybrid";
 
-  const runs = PREDICTION_STRATEGIES.map((strategy) =>
-    evaluateEngine(
-      draws,
-      drawType,
-      window,
-      strategy,
-      activeModel && activeModel.strategy === strategy
-        ? {
-            weights: activeModel.weights,
-            lookbackWindow: activeModel.lookbackWindow,
-            poolSize: activeModel.poolSize,
-            constraints: activeModel.constraints,
-          }
-        : null,
+  const runs = await Promise.all(
+    PREDICTION_STRATEGIES.map((strategy) =>
+      evaluateEngine(
+        draws,
+        drawType,
+        window,
+        strategy,
+        activeModel && activeModel.strategy === strategy
+          ? {
+              weights: activeModel.weights,
+              lookbackWindow: activeModel.lookbackWindow,
+              poolSize: activeModel.poolSize,
+              constraints: activeModel.constraints,
+            }
+          : null,
+      ),
     ),
   );
 
