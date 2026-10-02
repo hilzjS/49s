@@ -1,11 +1,12 @@
 /**
  * UK49s SuperHybrid API Routes
  *
- * SuperHybrid is a separate, selectable cross-session strategy (see
+ * SuperHybrid is a separate, selectable flip-flop strategy (see
  * `lib/db/src/schema/superhybrid-engine.ts`). These endpoints expose its
- * configuration, a live cross-session prediction (with its source draw) and a
- * cross-session walk-forward backtest. Nothing here reads or writes the active
- * model or the existing backtest results.
+ * configuration, the single live flip-flop prediction (latest draw → opposite
+ * session) and a flip-flop walk-forward backtest. Nothing here reads or writes
+ * the active model or the existing backtest results, and the backtest never
+ * inserts prediction records.
  */
 
 import { Router, type IRouter, type Request, type Response } from "express";
@@ -20,7 +21,7 @@ import {
 } from "@workspace/db/schema";
 import { logger } from "../lib/logger";
 import { requireAdmin } from "../lib/admin-auth";
-import { getSuperHybridConfig, getSuperHybridLivePrediction } from "../lib/superhybrid-service";
+import { getSuperHybridConfig, getSuperHybridNextPrediction } from "../lib/superhybrid-service";
 
 const router: IRouter = Router();
 
@@ -55,16 +56,11 @@ router.get("/config/:drawType", async (req: Request, res: Response) => {
   }
 });
 
-// Live cross-session prediction: latest opposite-session draw → next target draw
-router.get("/prediction/:drawType", async (req: Request, res: Response) => {
-  const drawType = parseDrawType(req.params.drawType);
-  if (!drawType) {
-    res.status(400).json({ error: "drawType must be 'lunchtime' or 'teatime'" });
-    return;
-  }
-
+// The live flip-flop prediction: latest actual draw → opposite next draw.
+// Idempotent — repeated calls without a new draw return the identical call.
+router.get("/prediction", async (_req: Request, res: Response) => {
   try {
-    const result = await getSuperHybridLivePrediction(drawType);
+    const result = await getSuperHybridNextPrediction();
     if (!result.ok) {
       // A clear "no source / not enough history" state — not an error.
       res.json({ success: false, error: result.error });
@@ -72,12 +68,12 @@ router.get("/prediction/:drawType", async (req: Request, res: Response) => {
     }
     res.json({ success: true, prediction: result.prediction });
   } catch (error) {
-    logger.error({ error, drawType }, "Failed to build SuperHybrid prediction");
+    logger.error({ error }, "Failed to build SuperHybrid prediction");
     res.status(500).json({ success: false, error: "Failed to build SuperHybrid prediction" });
   }
 });
 
-// Cross-session walk-forward backtest (admin). Baselines share the same sample.
+// Flip-flop walk-forward backtest (admin). Baselines share the same sample.
 router.post("/backtest", requireAdmin, async (req: Request, res: Response) => {
   const drawType = req.body?.drawType == null ? null : parseDrawType(req.body.drawType);
   if (req.body?.drawType != null && !drawType) {
@@ -104,26 +100,34 @@ router.post("/backtest", requireAdmin, async (req: Request, res: Response) => {
       maxTests,
     });
 
+    const config = await getSuperHybridConfig(drawType ?? "lunchtime");
+    const meta = {
+      strategy: report.strategy,
+      version: config.version,
+      modelConfigId: config.id,
+      lookback: config.lookback,
+      targetSession: drawType ?? "both",
+      sourceSession: drawType ? (drawType === "lunchtime" ? "teatime" : "lunchtime") : "opposite",
+    };
+
+    // No valid flip-flop step in the window: return a clean zero report rather
+    // than fabricating or inserting any prediction record.
     if (report.testedDraws === 0) {
-      res.status(400).json({
-        error:
-          "No draws could be resolved for this window (each target needs at least 20 earlier draws and a valid opposite-session source).",
+      res.json({
+        success: true,
+        model: meta,
+        report: { ...report, runs: [] },
+        message:
+          "No flip-flop steps could be resolved for this window (each step needs a latest draw whose opposite-session successor is also recorded, plus at least 20 earlier draws).",
+        warning:
+          "SuperHybrid results are out-of-sample walk-forward validation. Past performance does not guarantee future results. Lottery outcomes are random.",
       });
       return;
     }
 
-    const config = await getSuperHybridConfig(drawType ?? "lunchtime");
-
     res.json({
       success: true,
-      model: {
-        strategy: report.strategy,
-        version: config.version,
-        modelConfigId: config.id,
-        lookback: config.lookback,
-        targetSession: drawType ?? "both",
-        sourceSession: drawType ? (drawType === "lunchtime" ? "teatime" : "lunchtime") : "opposite",
-      },
+      model: meta,
       // Keep the payload bounded — every metric above is already aggregated, and
       // the UI only shows the most recent rows.
       report: { ...report, runs: report.runs.slice(-200) },

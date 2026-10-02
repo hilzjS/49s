@@ -204,6 +204,7 @@ export interface SuperHybridSource {
 }
 
 export interface SuperHybridLivePrediction {
+  /** The flip-flop target session — the opposite of the latest draw's session. */
   drawType: DrawType;
   targetDate: string;
   source: SuperHybridSource;
@@ -214,6 +215,10 @@ export interface SuperHybridLivePrediction {
   version: string;
   modelConfigId: number | null;
   sourceLabel: string;
+  /** The complete flip-flop step (latest draw → opposite next draw). */
+  cycle: { sourceSession: DrawType; sourceDate: string; targetSession: DrawType; targetDate: string };
+  /** `${targetDate}|${targetSession}` — the natural dedupe key for this step. */
+  cycleKey: string;
 }
 
 export interface SuperHybridSessionMetrics {
@@ -445,9 +450,10 @@ export const api = {
     ),
   getSuperHybridConfig: (drawType: DrawType) =>
     get<{ success: boolean; config: SuperHybridConfig }>(`/api/superhybrid/config/${drawType}`),
-  getSuperHybridPrediction: (drawType: DrawType) =>
+  // The live flip-flop call: the latest draw determines the opposite target.
+  getSuperHybridPrediction: () =>
     get<{ success: boolean; prediction?: SuperHybridLivePrediction; error?: string }>(
-      `/api/superhybrid/prediction/${drawType}`,
+      '/api/superhybrid/prediction',
     ),
   runSuperHybridBacktest: (body: {
     drawType?: DrawType | null;
@@ -456,7 +462,7 @@ export const api = {
     maxTests?: number;
     weights?: Partial<SuperHybridWeights>;
   }) =>
-    adminPost<{ success: boolean; model: SuperHybridModelMeta; report: SuperHybridReport }>(
+    adminPost<{ success: boolean; model: SuperHybridModelMeta; report: SuperHybridReport; message?: string }>(
       '/api/superhybrid/backtest',
       body,
     ),

@@ -266,15 +266,16 @@ function Base44Backtest({ drawType }: { drawType: DrawType }) {
 // SuperHybrid cross-session backtest
 // ---------------------------------------------------------------------------
 
-function LivePrediction({ drawType }: { drawType: DrawType }) {
-  const state = useAsync(() => api.getSuperHybridPrediction(drawType), [drawType]);
+function LivePrediction() {
+  // The latest actual draw drives the call — no session is requested.
+  const state = useAsync(() => api.getSuperHybridPrediction(), []);
   const prediction: SuperHybridLivePrediction | undefined = state.data?.prediction;
 
   return (
     <Card>
       <PanelHeader
-        title="Live cross-session call"
-        subtitle={state.data?.error ?? 'Latest opposite-session draw → next prediction'}
+        title="Live flip-flop call"
+        subtitle={state.data?.error ?? 'Latest actual draw → opposite session'}
         right={<Shuffle size={16} className="text-[var(--text-3)]" />}
       />
       {state.loading ? (
@@ -282,16 +283,19 @@ function LivePrediction({ drawType }: { drawType: DrawType }) {
       ) : state.error ? (
         <ErrorState message={state.error} onRetry={state.reload} />
       ) : !prediction ? (
-        <EmptyState title="No cross-session call available" description={state.data?.error ?? 'A prediction needs an opposite-session draw and enough history.'} />
+        <EmptyState title="No flip-flop call available" description={state.data?.error ?? 'A prediction needs a latest draw, an opposite-session successor and enough history.'} />
       ) : (
         <div className="space-y-4 px-5 py-5">
           <div className="flex flex-wrap items-center gap-2">
-            <Badge tone="violet">Predicting {SESSION_LABEL[prediction.drawType].toUpperCase()}</Badge>
             <Badge tone="sky">
-              Source: {SESSION_LABEL[prediction.source.drawType].toUpperCase()} {prediction.source.draw_date}
+              Source: {SESSION_LABEL[prediction.cycle.sourceSession].toUpperCase()} {prediction.cycle.sourceDate}
             </Badge>
+            <Badge tone="violet">Predicting {SESSION_LABEL[prediction.cycle.targetSession].toUpperCase()}</Badge>
             <Badge>{formatDate(prediction.targetDate)}</Badge>
           </div>
+          <p className="text-[11.5px] text-[var(--text-3)]">
+            Cycle key <span className="mono">{prediction.cycleKey}</span> — idempotent; a new draw flips the direction.
+          </p>
           <div>
             <p className="eyebrow">Source numbers</p>
             <div className="mt-2">
@@ -397,7 +401,9 @@ function SuperHybridBacktest() {
       setReport(response.report);
       setMeta(response.model);
       setMessage(
-        `SuperHybrid backtest complete: ${response.report.testedDraws} predictions (LUNCH ${response.report.bySession.lunchtime.testedDraws} · TEA ${response.report.bySession.teatime.testedDraws}).`,
+        response.report.testedDraws === 0
+          ? (response.message ?? 'No flip-flop steps could be resolved for this window — zero predictions.')
+          : `SuperHybrid backtest complete: ${response.report.testedDraws} predictions (LUNCH ${response.report.bySession.lunchtime.testedDraws} · TEA ${response.report.bySession.teatime.testedDraws}).`,
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'SuperHybrid backtest failed');
@@ -422,7 +428,7 @@ function SuperHybridBacktest() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         {config.data?.config ? <ConfigCard config={config.data.config} /> : <Card><Spinner /></Card>}
-        <LivePrediction drawType={drawType === 'lunchtime' ? 'lunchtime' : 'teatime'} />
+        <LivePrediction />
       </div>
 
       <Card>

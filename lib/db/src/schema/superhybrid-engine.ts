@@ -7,18 +7,23 @@
  * primitives (`scoreNumbers`, `weightedSample`, the deterministic PRNG) and adds
  * two things of its own:
  *
- *   1. **Cross-session input.** The primary signal for a target draw is the
- *      latest completed draw from the *opposite* session:
- *        latest LUNCH  → predict TEA
- *        latest TEA    → predict LUNCH
- *      The source is always strictly before the target in real chronology
- *      (by draw date, then session time), so nothing from the target draw or
- *      the future is ever used.
+ *   1. **Flip-Flop cycle.** The system alternates sessions forever:
+ *        latest LUNCH  → predict the next TEA
+ *        latest TEA    → predict the next LUNCH
+ *      The **source is always the chronologically latest actual draw**, never an
+ *      older draw picked to match a requested target session. The target session
+ *      is *derived* as the opposite of that latest draw, and the target date is
+ *      the next valid date for that session. Same-session steps (LUNCH→LUNCH,
+ *      TEA→TEA) never happen: a prediction is only made when the immediately
+ *      preceding draw is the opposite session. The source is always strictly
+ *      before the target in real chronology (by draw date, then session time),
+ *      so nothing from the target draw or the future is ever used.
  *
- *   2. **Flip-Flop.** A statistical transition feature measured from real
- *      historical opposite-session pairs (LUNCH→TEA, TEA→LUNCH): how often a
- *      number repeats from the opposite session, how often it alternates, and
- *      how much evidence there is for it. No invented transforms.
+ *   2. **Flip-Flop.** A statistical transition feature measured from the same
+ *      adjacent opposite-session pairs used for prediction (LUNCH→TEA,
+ *      TEA→LUNCH): how often a number repeats from the opposite session, how
+ *      often it alternates, and how much evidence there is for it. No invented
+ *      transforms.
  *
  * Components are min–max normalised onto a common scale before being combined,
  * so no single signal dominates. Weights live in the model-config infrastructure
@@ -142,22 +147,49 @@ export function sortChronological(draws: SessionDraw[]): SessionDraw[] {
 // Cross-session source resolution
 // ---------------------------------------------------------------------------
 
+/** Adds whole days to an ISO date without timezone drift. */
+export function addDaysIso(iso: string, days: number): string {
+  const [year, month, day] = iso.slice(0, 10).split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+/** The chronologically latest actual draw across all recorded draws. */
+export function latestCompletedDraw(draws: SessionDraw[]): SessionDraw | null {
+  const asc = sortChronological(draws);
+  return asc.length ? asc[asc.length - 1] : null;
+}
+
 /**
- * The latest opposite-session draw in `before` — i.e. the most recent draw of
- * the opposite session that is strictly before the target in chronology.
- * Never falls back to a same-session draw.
+ * The flip-flop target that follows a source draw: the opposite session, on the
+ * next valid date for that session.
+ *
+ * A LUNCH draw is followed by that day's TEA (17:49 > 12:30); a TEA draw is
+ * followed by the next day's LUNCH (12:30 < 17:49). This never assumes which
+ * session is "current" — it is driven purely by the source draw's session.
+ */
+export function flipFlopTargetOf(source: SessionDraw): { targetType: DrawType; targetDate: string } {
+  const targetType = oppositeSession(source.drawType);
+  const sameDay = drawTimeFor(targetType) > source.draw_time;
+  return { targetType, targetDate: sameDay ? source.draw_date : addDaysIso(source.draw_date, 1) };
+}
+
+/**
+ * The flip-flop source for a target: the *latest* draw in `before`, and only
+ * when it is the opposite session to the target. Never reaches back to an older
+ * opposite-session draw — a same-session latest draw yields no prediction.
  */
 export function latestSourceBefore(before: SessionDraw[], targetType: DrawType): SessionDraw | null {
-  const sourceType = oppositeSession(targetType);
-  for (let i = before.length - 1; i >= 0; i -= 1) {
-    if (before[i].drawType === sourceType) return before[i];
-  }
-  return null;
+  const latest = before.length ? before[before.length - 1] : null;
+  if (!latest) return null;
+  return latest.drawType === oppositeSession(targetType) ? latest : null;
 }
 
 /**
  * The latest completed opposite-session draw across all recorded draws — the
- * live source. Never assumes which session is "current".
+ * live source for a target. Never assumes which session is "current", and never
+ * falls back to an older draw than the chronologically latest one.
  */
 export function latestSource(draws: SessionDraw[], targetType: DrawType): SessionDraw | null {
   return latestSourceBefore(sortChronological(draws), targetType);
@@ -188,9 +220,10 @@ function clamp(value: number, min: number, max: number): number {
 /**
  * Flip-Flop statistics over chronological opposite-session transitions.
  *
- * For every target draw, the paired source is the latest preceding draw of the
- * opposite session (identical to the prediction pairing), so the feature can
- * never see the target draw itself.
+ * For every target draw, the paired source is the *immediately preceding* draw,
+ * and only when it is the opposite session (identical to the prediction
+ * pairing), so the feature can never see the target draw itself and never
+ * reaches back past a same-session draw.
  */
 export function flipFlopStats(allAsc: SessionDraw[]): FlipFlopStat[] {
   const repeat = new Array<number>(MAIN_MAX + 1).fill(0);
@@ -198,10 +231,10 @@ export function flipFlopStats(allAsc: SessionDraw[]): FlipFlopStat[] {
   const flips = new Array<number>(MAIN_MAX + 1).fill(0);
   const absent = new Array<number>(MAIN_MAX + 1).fill(0);
 
-  const lastOf: Record<DrawType, SessionDraw | null> = { lunchtime: null, teatime: null };
+  let previous: SessionDraw | null = null;
 
   for (const draw of allAsc) {
-    const source = lastOf[oppositeSession(draw.drawType)];
+    const source = previous && previous.drawType === oppositeSession(draw.drawType) ? previous : null;
     if (source) {
       const src = new Set(source.numbers);
       const tgt = new Set(draw.numbers);
@@ -215,7 +248,7 @@ export function flipFlopStats(allAsc: SessionDraw[]): FlipFlopStat[] {
         }
       }
     }
-    lastOf[draw.drawType] = draw;
+    previous = draw;
   }
 
   const repeatBase = MAIN_COUNT / MAIN_MAX; // P(target has n | source has n) by chance
@@ -388,23 +421,29 @@ export interface SuperHybridPrediction {
 export interface BuildSuperHybridOptions {
   /** Draws strictly before the target, in ascending chronology. */
   before: SessionDraw[];
+  /** The target session — must be the opposite of the latest draw in `before`. */
   targetType: DrawType;
-  targetDate: string;
+  /** Optional; derived from the source's flip-flop cycle when omitted. */
+  targetDate?: string;
   weights?: SuperHybridWeights;
 }
 
 /**
- * Builds a SuperHybrid line for a target session from the latest opposite-session
- * draw in `before`. Returns null when there is no eligible source draw or not
- * enough history — no prediction is fabricated.
+ * Builds a SuperHybrid line for the flip-flop target that follows the latest
+ * draw in `before`. The source is the chronologically latest draw, which must be
+ * the opposite session to `targetType`; otherwise (a same-session step) no
+ * prediction is made. Returns null when there is no eligible source draw or not
+ * enough history — no prediction is ever fabricated.
  */
 export function buildSuperHybridPrediction(opts: BuildSuperHybridOptions): SuperHybridPrediction | null {
-  const { before, targetType, targetDate } = opts;
+  const { before, targetType } = opts;
   const weights = opts.weights ?? DEFAULT_SUPERHYBRID_WEIGHTS;
 
   const source = latestSourceBefore(before, targetType);
   if (!source) return null;
   if (before.length < MIN_TRAIN) return null;
+
+  const targetDate = opts.targetDate ?? flipFlopTargetOf(source).targetDate;
 
   const sourceType = source.drawType;
   const targetDraws = before.filter((draw) => draw.drawType === targetType);
@@ -642,9 +681,11 @@ function defaultMetrics(): SessionMetrics {
 }
 
 /**
- * Scores one position in the chronological series: resolves the opposite-session
- * source, predicts, and evaluates the model plus the two baselines against the
- * same target. Returns null when the target is filtered out or ineligible.
+ * Scores one flip-flop step in the chronological series: the latest available
+ * draw (`allAsc[index - 1]`) is the source and the next draw (`allAsc[index]`)
+ * is the target. Only opposite-session steps are scored — a same-session step
+ * yields nothing. Evaluates the model plus the two baselines against the same
+ * target. Returns null when the step is filtered out or ineligible.
  */
 function scoreRunAt(
   allAsc: SessionDraw[],
@@ -652,6 +693,10 @@ function scoreRunAt(
   options: SuperHybridBacktestOptions,
   weights: SuperHybridWeights,
 ): SuperHybridRun | null {
+  // Flip-flop: never predict a draw from a same-session source.
+  const previous = allAsc[index - 1];
+  if (!previous || previous.drawType === allAsc[index].drawType) return null;
+
   const target = allAsc[index];
   if (options.only && target.drawType !== options.only) return null;
   if (options.startDate && target.draw_date < options.startDate) return null;
@@ -695,9 +740,13 @@ function scoreRunAt(
 }
 
 /**
- * Cross-session walk-forward backtest. Every target draw is predicted from the
- * latest preceding opposite-session draw only — never the target itself, never
- * the future. Baselines are computed over the exact same target sample.
+ * Flip-flop walk-forward backtest. It replays the live process exactly: at each
+ * point the latest available draw is the source, the immediately following draw
+ * is the target, and the run advances to the newly available draw before
+ * switching session. Same-session steps are skipped, so the evaluated runs form
+ * the alternating LUNCH→TEA→LUNCH→TEA chain. Every feature uses only draws
+ * strictly before the target — never the target itself, never the future.
+ * Baselines are computed over the exact same target sample.
  */
 export function runSuperHybridBacktest(
   draws: Uk49sDraw[],
@@ -708,7 +757,7 @@ export function runSuperHybridBacktest(
   const allAsc = sortChronological(toSessionDraws(draws));
   const runs: SuperHybridRun[] = [];
 
-  for (let i = 0; i < allAsc.length && runs.length < maxTests; i += 1) {
+  for (let i = 1; i < allAsc.length && runs.length < maxTests; i += 1) {
     const run = scoreRunAt(allAsc, i, options, weights);
     if (!run) continue;
     runs.push(run);
@@ -775,7 +824,7 @@ export async function runSuperHybridBacktestAsync(
   const allAsc = sortChronological(toSessionDraws(draws));
   const runs: SuperHybridRun[] = [];
 
-  for (let i = 0; i < allAsc.length && runs.length < maxTests; i += 1) {
+  for (let i = 1; i < allAsc.length && runs.length < maxTests; i += 1) {
     const run = scoreRunAt(allAsc, i, options, weights);
     if (run) runs.push(run);
     await yieldToEventLoop();

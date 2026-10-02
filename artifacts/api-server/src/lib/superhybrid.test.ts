@@ -1,24 +1,30 @@
 /**
- * SuperHybrid strategy tests — cross-session source selection, Flip-Flop,
- * leakage-safety and baseline sample alignment.
+ * SuperHybrid strategy tests — flip-flop draw selection (latest draw → opposite
+ * session), idempotency, the alternating walk-forward chain and leakage-safety.
  *
- * These test the engine directly (no database), matching the walk-forward logic
- * used live.
+ * These test the engine directly (no database), reproducing exactly what the
+ * live prediction engine would have known at each point in time.
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DEFAULT_SUPERHYBRID_WEIGHTS,
+  MAIN_COUNT,
+  MAIN_MAX,
   MIN_TRAIN,
   buildSuperHybridPrediction,
+  drawTimeFor,
   flipFlopStats,
-  latestSource,
+  flipFlopTargetOf,
+  latestCompletedDraw,
+  latestSourceBefore,
   runSuperHybridBacktest,
   sortChronological,
   toSessionDraws,
   type DrawType,
   type SessionDraw,
+  type SuperHybridPrediction,
   type Uk49sDraw,
 } from "@workspace/db/schema";
 
@@ -66,52 +72,137 @@ function asc(draws: Uk49sDraw[]): SessionDraw[] {
   return sortChronological(toSessionDraws(draws));
 }
 
-/** Draws strictly before a target, in chronological order. */
-function before(draws: Uk49sDraw[], targetDate: string, targetTime: string): SessionDraw[] {
-  return asc(draws).filter((d) => `${d.draw_date}T${d.draw_time}` < `${targetDate}T${targetTime}`);
+/**
+ * Reproduces the live engine exactly: resolve the latest actual draw, derive the
+ * opposite target session and its next date, then predict from the prior draws.
+ */
+function liveStep(draws: Uk49sDraw[]): SuperHybridPrediction | null {
+  const allAsc = asc(draws);
+  const source = latestCompletedDraw(allAsc);
+  if (!source) return null;
+  const { targetType, targetDate } = flipFlopTargetOf(source);
+  const key = `${targetDate}T${drawTimeFor(targetType)}`;
+  const before = allAsc.filter((d) => `${d.draw_date}T${d.draw_time}` < key);
+  return buildSuperHybridPrediction({ before, targetType, targetDate });
 }
 
 const START = "2026-09-01";
 
+// A series whose latest draw is LUNCH 2026-09-30 (the final TEA is withheld).
+const endingOnLunch = bothSessionDays(START, 30).filter(
+  (d) => !(d.drawDate === "2026-09-30" && d.drawType === "teatime"),
+);
+
 // ---------------------------------------------------------------------------
-// Test 1 — TEA prediction source
+// 1 & 2 — session mapping + example sequence
 // ---------------------------------------------------------------------------
 
-test("SuperHybrid: a TEA prediction uses the latest preceding LUNCH", () => {
-  const draws = bothSessionDays(START, 32); // ... through 2026-10-01
-  const target = "2026-10-01";
-  const prediction = buildSuperHybridPrediction({
-    before: before(draws, target, "17:49"),
-    targetType: "teatime",
-    targetDate: target,
-  });
+test("SuperHybrid: latest draw LUNCH → target is that day's TEA", () => {
+  const latest = latestCompletedDraw(asc(endingOnLunch));
+  assert.ok(latest);
+  assert.equal(latest.drawType, "lunchtime");
+  assert.deepEqual(flipFlopTargetOf(latest), { targetType: "teatime", targetDate: "2026-09-30" });
 
+  const prediction = liveStep(endingOnLunch);
   assert.ok(prediction);
+  assert.equal(prediction.target_type, "teatime");
+  assert.equal(prediction.target_date, "2026-09-30");
   assert.equal(prediction.source.drawType, "lunchtime");
-  assert.equal(prediction.source.draw_date, target);
-  assert.notEqual(prediction.source.draw_date, "2026-09-30");
+  assert.equal(prediction.source.draw_date, "2026-09-30");
 });
 
-// ---------------------------------------------------------------------------
-// Test 2 — LUNCH prediction source
-// ---------------------------------------------------------------------------
+test("SuperHybrid: latest draw TEA → target is the next day's LUNCH", () => {
+  const withTea = [...endingOnLunch, draw("2026-09-30", "teatime", [7, 8, 9, 10, 11, 12], 20)];
+  const latest = latestCompletedDraw(asc(withTea));
+  assert.ok(latest);
+  assert.equal(latest.drawType, "teatime");
+  assert.deepEqual(flipFlopTargetOf(latest), { targetType: "lunchtime", targetDate: "2026-10-01" });
 
-test("SuperHybrid: a LUNCH prediction uses the latest preceding TEA", () => {
-  const draws = bothSessionDays(START, 33); // ... through 2026-10-02
-  const target = "2026-10-02";
-  const prediction = buildSuperHybridPrediction({
-    before: before(draws, target, "12:30"),
-    targetType: "lunchtime",
-    targetDate: target,
-  });
-
+  const prediction = liveStep(withTea);
   assert.ok(prediction);
+  assert.equal(prediction.target_type, "lunchtime");
+  assert.equal(prediction.target_date, "2026-10-01");
   assert.equal(prediction.source.drawType, "teatime");
-  assert.equal(prediction.source.draw_date, "2026-10-01");
+  assert.equal(prediction.source.draw_date, "2026-09-30");
 });
 
 // ---------------------------------------------------------------------------
-// Test 3 — No leakage
+// 3 — never same-session
+// ---------------------------------------------------------------------------
+
+test("SuperHybrid: no same-session prediction is ever produced", () => {
+  const series = asc(endingOnLunch); // latest = LUNCH
+  // Asking for a LUNCH prediction from a LUNCH source is rejected outright.
+  assert.equal(latestSourceBefore(series, "lunchtime"), null);
+  assert.equal(
+    buildSuperHybridPrediction({ before: series, targetType: "lunchtime", targetDate: "2026-09-30" }),
+    null,
+  );
+  // The opposite direction is fine.
+  assert.ok(buildSuperHybridPrediction({ before: series, targetType: "teatime" }));
+});
+
+// ---------------------------------------------------------------------------
+// 4 — idempotency (no duplicate predictions)
+// ---------------------------------------------------------------------------
+
+test("SuperHybrid: repeated runs without a new draw are identical (idempotent)", () => {
+  const first = liveStep(endingOnLunch);
+  const second = liveStep(endingOnLunch);
+  assert.ok(first && second);
+  assert.deepEqual(first, second);
+});
+
+// ---------------------------------------------------------------------------
+// 5 — a new draw flips the direction
+// ---------------------------------------------------------------------------
+
+test("SuperHybrid: a new draw switches the prediction direction", () => {
+  const beforeFlip = liveStep(endingOnLunch);
+  assert.ok(beforeFlip);
+  assert.equal(beforeFlip.target_type, "teatime");
+
+  const afterFlip = liveStep([...endingOnLunch, draw("2026-09-30", "teatime", [7, 8, 9, 10, 11, 12], 20)]);
+  assert.ok(afterFlip);
+  assert.equal(afterFlip.target_type, "lunchtime");
+  assert.equal(afterFlip.source.draw_date, "2026-09-30");
+});
+
+// ---------------------------------------------------------------------------
+// 6 — the backtest is the alternating chain
+// ---------------------------------------------------------------------------
+
+test("SuperHybrid: the backtest advances LUNCH → TEA → LUNCH → TEA", () => {
+  const report = runSuperHybridBacktest(bothSessionDays(START, 45));
+  assert.ok(report.runs.length > 0);
+
+  for (let i = 0; i < report.runs.length; i += 1) {
+    const run = report.runs[i];
+    assert.notEqual(run.source_session, run.target_session);
+    if (i > 0) {
+      // Each target becomes the next source — the chain never skips a step.
+      assert.equal(run.source_session, report.runs[i - 1].target_session);
+      assert.equal(run.source_date, report.runs[i - 1].target_date);
+    }
+  }
+});
+
+test("SuperHybrid: a same-session step in the data produces no run", () => {
+  // Two consecutive LUNCH draws (a missing TEA): the second LUNCH is never a
+  // target, but the chain resumes at the next TEA.
+  const messy = bothSessionDays(START, 25).filter(
+    (d) => !(d.drawDate === "2026-09-20" && d.drawType === "teatime"),
+  );
+  const report = runSuperHybridBacktest(messy);
+  assert.ok(report.runs.length > 0);
+  for (const run of report.runs) {
+    assert.notEqual(run.source_session, run.target_session);
+    assert.ok(!(run.source_date === "2026-09-20" && run.source_session === "lunchtime" && run.target_session === "lunchtime"));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 7 — no future information
 // ---------------------------------------------------------------------------
 
 test("SuperHybrid: no future data — earlier runs are identical when later draws change", () => {
@@ -121,7 +212,6 @@ test("SuperHybrid: no future data — earlier runs are identical when later draw
   const truncated = runSuperHybridBacktest(draws.slice(0, cutIdx));
 
   assert.ok(full.runs.length > 0 && truncated.runs.length > 0);
-  // Every run the truncated backtest could see must be byte-identical.
   for (const run of truncated.runs) {
     const match = full.runs.find(
       (r) => r.target_date === run.target_date && r.target_session === run.target_session,
@@ -131,22 +221,26 @@ test("SuperHybrid: no future data — earlier runs are identical when later draw
   }
 });
 
-test("SuperHybrid: the target draw is never the source", () => {
-  const report = runSuperHybridBacktest(bothSessionDays(START, 40));
-  assert.ok(report.runs.length > 0);
-  for (const run of report.runs) {
-    assert.notEqual(run.source_session, run.target_session);
-    assert.ok(
-      `${run.source_date}T00:00` <= `${run.target_date}T23:59`,
-      "source must not be after the target",
-    );
-    // Identical date is only valid when the source session runs earlier that day.
-    if (run.source_date === run.target_date) assert.equal(run.source_session, "lunchtime");
+// ---------------------------------------------------------------------------
+// 8 — clean zero, no fabricated records
+// ---------------------------------------------------------------------------
+
+test("SuperHybrid: zero valid flip-flop steps return zero predictions", () => {
+  // TEA-only history: every step is TEA → TEA (same session) and is skipped.
+  const teaOnly: Uk49sDraw[] = [];
+  for (let i = 0; i < 30; i += 1) {
+    teaOnly.push(draw(shift(START, i), "teatime", [1, 2, 3, 4, 5, 6], 7));
   }
+  const report = runSuperHybridBacktest(teaOnly);
+  assert.equal(report.testedDraws, 0);
+  assert.equal(report.runs.length, 0);
+  assert.equal(report.overall.testedDraws, 0);
+  // A single-draw history has no successor at all.
+  assert.equal(runSuperHybridBacktest([draw(START, "lunchtime", [1, 2, 3, 4, 5, 6], 7)]).testedDraws, 0);
 });
 
 // ---------------------------------------------------------------------------
-// Test 4 — Flip-Flop determinism
+// 9 & 10 — engine + Flip-Flop unchanged, session selection is the mechanism
 // ---------------------------------------------------------------------------
 
 test("SuperHybrid: Flip-Flop is deterministic and rewards real cross-session repeats", () => {
@@ -165,115 +259,40 @@ test("SuperHybrid: Flip-Flop is deterministic and rewards real cross-session rep
   const five = first.find((stat) => stat.n === 5);
   const never = first.find((stat) => stat.n === 49);
   assert.ok(five && never);
-  // 5 appears in every LUNCH and every TEA → strong positive repeat signal.
   assert.ok(five.score > 0.5, `expected > 0.5, got ${five.score}`);
-  // 49 never appears → stays neutral.
   assert.ok(never.score >= 0.25 && never.score <= 0.75, `expected neutral, got ${never.score}`);
 });
 
-// ---------------------------------------------------------------------------
-// Test 5 — Session separation
-// ---------------------------------------------------------------------------
-
-test("SuperHybrid: LUNCH and TEA targets are evaluated independently", () => {
-  const draws = bothSessionDays(START, 45);
-
-  const lunch = runSuperHybridBacktest(draws, { only: "lunchtime" });
-  const tea = runSuperHybridBacktest(draws, { only: "teatime" });
-
-  assert.ok(lunch.runs.length > 0 && tea.runs.length > 0);
-  assert.ok(lunch.runs.every((run) => run.target_session === "lunchtime"));
-  assert.ok(tea.runs.every((run) => run.target_session === "teatime"));
-
-  // Direction breakdown maps to the opposite source.
-  assert.equal(tea.directions.lunchToTea.testedDraws, tea.runs.length);
-  assert.equal(tea.directions.teaToLunch.testedDraws, 0);
-  assert.equal(lunch.directions.teaToLunch.testedDraws, lunch.runs.length);
-  assert.equal(lunch.directions.lunchToTea.testedDraws, 0);
-});
-
-// ---------------------------------------------------------------------------
-// Test 6 — Latest live source is auto-detected
-// ---------------------------------------------------------------------------
-
-test("SuperHybrid: the latest opposite-session draw is selected automatically", () => {
-  const draws = bothSessionDays(START, 32); // newest day: 2026-10-02
-  const series = asc(draws);
-
-  const teaSource = latestSource(series, "teatime");
-  assert.ok(teaSource);
-  assert.equal(teaSource.drawType, "lunchtime");
-  assert.equal(teaSource.draw_date, "2026-10-02");
-
-  const lunchSource = latestSource(series, "lunchtime");
-  assert.ok(lunchSource);
-  assert.equal(lunchSource.drawType, "teatime");
-  assert.equal(lunchSource.draw_date, "2026-10-02");
-
-  // Reversed insertion order must not change the resolved source.
-  const shuffled = [...draws].reverse();
-  assert.equal(latestSource(asc(shuffled), "teatime")?.draw_date, "2026-10-02");
-});
-
-// ---------------------------------------------------------------------------
-// Test 7 — Missing source
-// ---------------------------------------------------------------------------
-
-test("SuperHybrid: no prediction is fabricated without an opposite-session draw", () => {
-  // TEA-only history: a TEA prediction has no LUNCH source at all.
-  const teaOnly: Uk49sDraw[] = [];
-  for (let i = 0; i < 30; i += 1) {
-    teaOnly.push(draw(shift(START, i), "teatime", [1, 2, 3, 4, 5, 6], 7));
-  }
-  const teaSeries = asc(teaOnly);
-  assert.ok(teaSeries.length >= MIN_TRAIN);
-  assert.equal(
-    buildSuperHybridPrediction({ before: teaSeries, targetType: "teatime", targetDate: "2026-12-01" }),
-    null,
-  );
-
-  // LUNCH-only history: a TEA prediction has no TEA history to score against.
-  const lunchOnly: Uk49sDraw[] = [];
-  for (let i = 0; i < 30; i += 1) {
-    lunchOnly.push(draw(shift(START, i), "lunchtime", [1, 2, 3, 4, 5, 6], 7));
-  }
-  assert.equal(
-    buildSuperHybridPrediction({ before: asc(lunchOnly), targetType: "teatime", targetDate: "2026-12-01" }),
-    null,
-  );
-
-  // The backtest simply resolves nothing rather than inventing predictions.
-  assert.equal(runSuperHybridBacktest(teaOnly, { only: "lunchtime" }).testedDraws, 0);
-});
-
-// ---------------------------------------------------------------------------
-// Test 8 — Baseline sample
-// ---------------------------------------------------------------------------
-
-test("SuperHybrid: random and frequency baselines use the exact same target sample", () => {
+test("SuperHybrid: the prediction is a valid 4 + 1 line and weights are untouched", () => {
   const report = runSuperHybridBacktest(bothSessionDays(START, 45));
-
   assert.ok(report.runs.length > 0);
-  assert.equal(report.overall.testedDraws, report.runs.length);
-  assert.equal(
-    report.bySession.lunchtime.testedDraws + report.bySession.teatime.testedDraws,
-    report.runs.length,
-  );
+  assert.deepEqual(report.weights, DEFAULT_SUPERHYBRID_WEIGHTS);
 
-  // Every run carries both baselines for the same target draw.
   for (const run of report.runs) {
-    assert.ok(Number.isFinite(run.randomHits));
-    assert.ok(Number.isFinite(run.frequencyHits));
-    assert.ok(run.randomHits >= 0 && run.randomHits <= 4);
-    assert.ok(run.frequencyHits >= 0 && run.frequencyHits <= 4);
+    assert.equal(run.predicted.length, MAIN_COUNT);
+    assert.equal(new Set(run.predicted).size, MAIN_COUNT);
+    for (const n of run.predicted) assert.ok(n >= 1 && n <= MAIN_MAX);
+    assert.ok(run.predicted_booster >= 1 && run.predicted_booster <= MAIN_MAX);
+    assert.ok(Number.isFinite(run.randomHits) && Number.isFinite(run.frequencyHits));
   }
 
-  // Hit distribution sums to the resolved sample.
   const sum = report.overall.hitDistribution.reduce((acc, entry) => acc + entry.lines, 0);
   assert.equal(sum, report.runs.length);
+  assert.equal(report.overall.testedDraws, report.runs.length);
+});
 
-  // Weights are the configured defaults, never optimised in this module.
-  assert.deepEqual(report.weights, DEFAULT_SUPERHYBRID_WEIGHTS);
+test("SuperHybrid: every run has at least the minimum training history behind it", () => {
+  const draws = bothSessionDays(START, 45);
+  const report = runSuperHybridBacktest(draws);
+  const allAsc = asc(draws);
+  assert.ok(report.runs.length > 0);
+
+  for (const run of report.runs) {
+    const history = allAsc.filter(
+      (d) => `${d.draw_date}T${d.draw_time}` < `${run.target_date}T${drawTimeFor(run.target_session)}`,
+    ).length;
+    assert.ok(history >= MIN_TRAIN, `expected ≥ ${MIN_TRAIN} prior draws, got ${history}`);
+  }
 });
 
 console.log("All SuperHybrid tests loaded.");

@@ -1,5 +1,5 @@
 /**
- * SuperHybrid service — the DB-backed configuration and live cross-session
+ * SuperHybrid service — the DB-backed configuration and live flip-flop
  * prediction for the SuperHybrid strategy.
  *
  * IMPORTANT: SuperHybrid is a *separate, selectable* strategy. Its config is
@@ -9,6 +9,13 @@
  * existing model (including vv1790135925577) is left completely untouched.
  *
  * SuperHybrid weights are configured but never auto-optimised here.
+ *
+ * The live call follows the flip-flop cycle exactly:
+ *   latest actual draw → opposite session → next valid date → prediction.
+ * The requested target never drives source selection, and because the engine is
+ * a pure function of (source, history, weights) the call is idempotent: running
+ * it repeatedly without a new draw returns the identical prediction and cannot
+ * create a duplicate.
  */
 
 import { db } from "@workspace/db";
@@ -21,8 +28,12 @@ import {
   SUPERHYBRID_WEIGHT_ORDER,
   buildSuperHybridPrediction,
   drawTimeFor,
+  flipFlopTargetOf,
+  latestCompletedDraw,
+  oppositeSession,
   sortChronological,
   toSessionDraws,
+  type DrawType,
   type SuperHybridPrediction,
   type SuperHybridWeights,
 } from "@workspace/db/schema";
@@ -32,7 +43,7 @@ import { logger } from "./logger";
 export interface SuperHybridConfig {
   /** null until the config row exists (defaults are still applied). */
   id: number | null;
-  drawType: "lunchtime" | "teatime";
+  drawType: DrawType;
   strategy: typeof SUPERHYBRID_STRATEGY;
   version: string;
   weights: SuperHybridWeights;
@@ -41,7 +52,8 @@ export interface SuperHybridConfig {
 }
 
 export interface SuperHybridLivePrediction {
-  drawType: "lunchtime" | "teatime";
+  /** The flip-flop target session — the opposite of the latest draw's session. */
+  drawType: DrawType;
   targetDate: string;
   source: SuperHybridPrediction["source"];
   numbers: number[];
@@ -52,17 +64,13 @@ export interface SuperHybridLivePrediction {
   modelConfigId: number | null;
   /** Ready-made admin caption, e.g. "Predicting TEA — Source: LUNCH 2026-10-01". */
   sourceLabel: string;
+  /** The complete flip-flop step, for transparency on the client. */
+  cycle: { sourceSession: DrawType; sourceDate: string; targetSession: DrawType; targetDate: string };
+  /** `${targetDate}|${targetSession}` — the natural dedupe key for this step. */
+  cycleKey: string;
 }
 
-const SESSION_LABEL: Record<"lunchtime" | "teatime", string> = { lunchtime: "LUNCH", teatime: "TEA" };
-
-/** Whole-day date arithmetic without timezone drift. */
-function addDaysIso(iso: string, days: number): string {
-  const [year, month, day] = iso.slice(0, 10).split("-").map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
-}
+const SESSION_LABEL: Record<DrawType, string> = { lunchtime: "LUNCH", teatime: "TEA" };
 
 // Existing model-config columns carrying the eight SuperHybrid weights (the
 // strategy reuses the current infrastructure rather than a new table).
@@ -94,7 +102,7 @@ function parseWeights(description: string | null): SuperHybridWeights {
   }
 }
 
-async function readRow(drawType: "lunchtime" | "teatime") {
+async function readRow(drawType: DrawType) {
   const rows = await db
     .select()
     .from(uk49sModelConfigs)
@@ -108,7 +116,7 @@ async function readRow(drawType: "lunchtime" | "teatime") {
  * Returns the SuperHybrid config for a session, creating its own (archived)
  * model-config record on first use. Never touches the active model.
  */
-export async function getSuperHybridConfig(drawType: "lunchtime" | "teatime"): Promise<SuperHybridConfig> {
+export async function getSuperHybridConfig(drawType: DrawType): Promise<SuperHybridConfig> {
   let row = await readRow(drawType);
 
   if (!row) {
@@ -129,7 +137,7 @@ export async function getSuperHybridConfig(drawType: "lunchtime" | "teatime"): P
             engine: SUPERHYBRID_STRATEGY,
             version: SUPERHYBRID_VERSION,
             weights: DEFAULT_SUPERHYBRID_WEIGHTS,
-            note: "Cross-session strategy. Weights are configured, not auto-optimised.",
+            note: "Flip-flop strategy (latest draw → opposite session). Weights are configured, not auto-optimised.",
           }),
         })
         .returning();
@@ -154,56 +162,49 @@ export async function getSuperHybridConfig(drawType: "lunchtime" | "teatime"): P
 }
 
 /**
- * The live SuperHybrid prediction for a session: the target is the next undrawn
- * date for that session, and the source is the latest completed draw of the
- * opposite session (auto-detected from the database — never hardcoded).
+ * The single live flip-flop prediction. The chronologically latest actual draw
+ * is resolved from the database first; its session determines the opposite
+ * target session and the next valid target date. The requested target is never
+ * used to pick the source.
  */
-export async function getSuperHybridLivePrediction(
-  drawType: "lunchtime" | "teatime",
-): Promise<{ ok: true; prediction: SuperHybridLivePrediction } | { ok: false; error: string }> {
+export async function getSuperHybridNextPrediction(): Promise<
+  { ok: true; prediction: SuperHybridLivePrediction } | { ok: false; error: string }
+> {
   const draws = await db.select().from(uk49sDraws);
   if (draws.length === 0) return { ok: false, error: "No draws are recorded yet." };
 
-  const sessionDraws = toSessionDraws(draws);
-  const allAsc = sortChronological(sessionDraws);
+  const allAsc = sortChronological(toSessionDraws(draws));
+  const source = latestCompletedDraw(allAsc);
+  if (!source) return { ok: false, error: "No draws are recorded yet." };
 
-  const own = allAsc.filter((draw) => draw.drawType === drawType);
-  if (own.length === 0) {
-    return { ok: false, error: `No ${SESSION_LABEL[drawType]} draws are recorded yet.` };
-  }
-
-  const config = await getSuperHybridConfig(drawType);
-  const targetDate = addDaysIso(own[own.length - 1].draw_date, 1);
-  const drawTime = drawTimeFor(drawType);
-  const targetKey = `${targetDate}T${drawTime}`;
-
-  // Only draws strictly before the target are eligible as a source, exactly like
-  // the backtest. This keeps the live call leakage-free even if the opposite
-  // session's data is ahead of this session's (a missing/lagging draw).
+  // Latest draw → opposite target session → next valid date for that session.
+  const { targetType, targetDate } = flipFlopTargetOf(source);
+  const targetKey = `${targetDate}T${drawTimeFor(targetType)}`;
+  // Only draws strictly before the target are eligible, exactly like the backtest.
   const before = allAsc.filter((draw) => `${draw.draw_date}T${draw.draw_time}` < targetKey);
 
+  const config = await getSuperHybridConfig(targetType);
   const prediction = buildSuperHybridPrediction({
     before,
-    targetType: drawType,
+    targetType,
     targetDate,
     weights: config.weights,
   });
 
   if (!prediction) {
-    const opposite: "lunchtime" | "teatime" = drawType === "lunchtime" ? "teatime" : "lunchtime";
-    const hasSource = before.some((draw) => draw.drawType === opposite);
+    const hasSourceHistory = before.some((draw) => draw.drawType === oppositeSession(targetType));
     return {
       ok: false,
-      error: hasSource
-        ? `Not enough history to build a ${SESSION_LABEL[drawType]} prediction (need at least 20 prior draws).`
-        : `No previous ${SESSION_LABEL[opposite]} draw available for ${SESSION_LABEL[drawType]} prediction.`,
+      error: hasSourceHistory
+        ? `Not enough history to build a ${SESSION_LABEL[targetType]} prediction (need at least 20 prior draws).`
+        : `No previous ${SESSION_LABEL[oppositeSession(targetType)]} history available for ${SESSION_LABEL[targetType]} prediction.`,
     };
   }
 
   return {
     ok: true,
     prediction: {
-      drawType,
+      drawType: targetType,
       targetDate,
       source: prediction.source,
       numbers: prediction.numbers,
@@ -212,7 +213,14 @@ export async function getSuperHybridLivePrediction(
       contributions: prediction.contributions,
       version: config.version,
       modelConfigId: config.id,
-      sourceLabel: `Predicting ${SESSION_LABEL[drawType]} — Source: ${SESSION_LABEL[prediction.source.drawType]} ${prediction.source.draw_date}`,
+      sourceLabel: `Predicting ${SESSION_LABEL[targetType]} — Source: ${SESSION_LABEL[prediction.source.drawType]} ${prediction.source.draw_date}`,
+      cycle: {
+        sourceSession: source.drawType,
+        sourceDate: source.draw_date,
+        targetSession: targetType,
+        targetDate,
+      },
+      cycleKey: `${targetDate}|${targetType}`,
     },
   };
 }
