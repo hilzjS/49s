@@ -346,6 +346,88 @@ function toStoredConfigRow(
   };
 }
 
+/** Rows per insert statement. Keeps a single statement small. */
+const CONFIG_INSERT_CHUNK_SIZE = 100;
+/** Attempts per insert chunk, including the first. */
+const CONFIG_INSERT_ATTEMPTS = 3;
+
+/**
+ * Extracts the most specific message from a wrapped error. Drizzle wraps every
+ * query failure in a `DrizzleQueryError` whose message is the entire SQL text
+ * (thousands of characters); the actual reason lives on `cause`. Surfacing the
+ * innermost message is what makes a failure diagnosable.
+ */
+function describeDbError(error: unknown, fallback: string): string {
+  let message = fallback;
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current instanceof Error; depth += 1) {
+    if (current.message) message = current.message;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return message.replace(/\s+/g, " ").trim().slice(0, 500) || fallback;
+}
+
+/**
+ * Errors that mean the statement did not run to completion (the connection was
+ * dropped/refused), so re-sending it cannot double-insert a committed batch.
+ * Permanent errors (invalid column, constraint violation, ...) are excluded and
+ * are reported immediately.
+ */
+const TRANSIENT_DB_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "EPIPE",
+  "ENOTFOUND",
+  "08000",
+  "08001",
+  "08003",
+  "08004",
+  "08006",
+  "57P01",
+  "57P02",
+  "57P03",
+  "53300",
+]);
+
+function isTransientDbError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && TRANSIENT_DB_CODES.has(code)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/**
+ * Inserts one chunk of configuration rows, retrying only transient connection
+ * failures. The database connection can be recycled by a managed/pooled
+ * PostgreSQL provider, which would otherwise fail an otherwise-successful
+ * optimization run at the very last step.
+ */
+async function insertConfigChunk(
+  runId: number,
+  rows: (typeof uk49sOptimizerConfigs.$inferInsert)[],
+): Promise<number[]> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const inserted = await db
+        .insert(uk49sOptimizerConfigs)
+        .values(rows)
+        .returning({ id: uk49sOptimizerConfigs.id });
+      return inserted.map((row) => row.id);
+    } catch (error) {
+      if (attempt >= CONFIG_INSERT_ATTEMPTS || !isTransientDbError(error)) throw error;
+      logger.warn(
+        { runId, attempt, reason: describeDbError(error, "unknown database error") },
+        "Transient database error storing optimizer results; retrying",
+      );
+      await new Promise((resolve) => setTimeout(resolve, attempt * 500));
+    }
+  }
+}
+
 /**
  * Stores the tested configurations and returns the database id of the chosen
  * configuration (the 4-hit one when the target was reached).
@@ -368,16 +450,23 @@ async function storeConfigurationResults(
 
   if (rows.length === 0) return null;
 
+  const insertedIds: number[] = [];
   try {
-    const inserted = await db.insert(uk49sOptimizerConfigs).values(rows).returning({ id: uk49sOptimizerConfigs.id });
-
-    if (!target) return null;
-    const idIndex = includeTargetSeparately ? rows.length - 1 : targetIndex;
-    return inserted[idIndex]?.id ?? null;
+    for (let start = 0; start < rows.length; start += CONFIG_INSERT_CHUNK_SIZE) {
+      const chunk = rows.slice(start, start + CONFIG_INSERT_CHUNK_SIZE);
+      insertedIds.push(...(await insertConfigChunk(runId, chunk)));
+    }
   } catch (error) {
-    logger.error({ error, runId }, "Failed to store optimizer configuration results");
+    logger.error(
+      { runId, reason: describeDbError(error, "unknown database error") },
+      "Failed to store optimizer configuration results",
+    );
     throw error;
   }
+
+  if (!target) return null;
+  const idIndex = includeTargetSeparately ? rows.length - 1 : targetIndex;
+  return insertedIds[idIndex] ?? null;
 }
 
 async function finalizeSuccess(job: OptimizerJob, result: OptimizerResult): Promise<void> {
@@ -449,6 +538,7 @@ async function finalizeSuccess(job: OptimizerJob, result: OptimizerResult): Prom
     job.worker = null;
 
     if (job.applyOnComplete && target && target.validationSampleSize >= job.minValidationSamples) {
+
       try {
         await updateActiveModel(
           job.drawType,
@@ -469,7 +559,9 @@ async function finalizeSuccess(job: OptimizerJob, result: OptimizerResult): Prom
       }
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to store optimizer results";
+    // Report the actual database reason (e.g. "connection terminated") rather
+    // than Drizzle's wrapped message, which is the entire insert statement.
+    const message = describeDbError(error, "Failed to store optimizer results");
     job.status = "failed";
     job.errorMessage = message;
     job.finishedAt = Date.now();

@@ -188,6 +188,26 @@ ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS four_hit_predicted_
 ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS four_hit_actual_main text;
 ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS four_hit_hits integer;
 
+-- Additive: strategy / pool size and the superhybrid3 feature weights. These
+-- columns exist in the Drizzle schema (`lib/db/src/schema/uk49s.ts`) and are
+-- always part of every INSERT the application builds. A database created from
+-- this file must therefore contain them too, otherwise those inserts fail with
+-- `column ... does not exist`.
+ALTER TABLE uk49s_model_configs     ADD COLUMN IF NOT EXISTS strategy text NOT NULL DEFAULT 'superhybrid';
+ALTER TABLE uk49s_model_configs     ADD COLUMN IF NOT EXISTS pool_size integer NOT NULL DEFAULT 10;
+ALTER TABLE uk49s_model_configs     ADD COLUMN IF NOT EXISTS weight_bonus_influence real NOT NULL DEFAULT 0;
+ALTER TABLE uk49s_model_configs     ADD COLUMN IF NOT EXISTS weight_momentum real NOT NULL DEFAULT 0;
+ALTER TABLE uk49s_model_configs     ADD COLUMN IF NOT EXISTS weight_neighbour real NOT NULL DEFAULT 0;
+
+ALTER TABLE uk49s_optimizer_runs    ADD COLUMN IF NOT EXISTS strategy text NOT NULL DEFAULT 'superhybrid';
+ALTER TABLE uk49s_optimizer_runs    ADD COLUMN IF NOT EXISTS pool_size integer NOT NULL DEFAULT 10;
+
+ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS strategy text NOT NULL DEFAULT 'superhybrid';
+ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS pool_size integer NOT NULL DEFAULT 10;
+ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS weight_bonus_influence real NOT NULL DEFAULT 0;
+ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS weight_momentum real NOT NULL DEFAULT 0;
+ALTER TABLE uk49s_optimizer_configs ADD COLUMN IF NOT EXISTS weight_neighbour real NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS uk49s_optimizer_runs_type_status_idx
   ON uk49s_optimizer_runs (draw_type, status);
 
