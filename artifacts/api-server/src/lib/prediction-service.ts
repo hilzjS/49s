@@ -305,11 +305,11 @@ export async function generateAndStorePrediction(
       const selected = hybrid.componentScores.filter((s) => mainNumbers.includes(s.number));
       overallScore = selected.length > 0 ? selected.reduce((sum, s) => sum + s.overallScore, 0) / selected.length : 0;
     } else if (strategy === "superhybrid3") {
+      trainingCutoff = draws[draws.length - 1].drawDate;
       const previousPredictions = await db
         .select()
         .from(uk49sPredictions)
         .where(eq(uk49sPredictions.drawType, drawType))
-        .where(eq(uk49sPredictions.trainingCutoff, trainingCutoff))
         .orderBy(desc(uk49sPredictions.createdAt))
         .limit(20)
         .then((rows) => rows.map((p) => ({
@@ -328,7 +328,6 @@ export async function generateAndStorePrediction(
       );
       mainNumbers = v3.mainNumbers;
       boosterBall = v3.boosterBall;
-      trainingCutoff = draws[draws.length - 1].drawDate;
       componentScoresJson = JSON.stringify({
         strategy: "superhybrid3",
         mainNumbers,
