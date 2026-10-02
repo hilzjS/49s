@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AlertTriangle, RefreshCw, Sparkles, Target, TrendingUp, Wand2 } from 'lucide-react';
 import { api, type DrawType } from '@/lib/api';
 import { useAsync, formatDate, formatDateTime } from '@/lib/useAsync';
@@ -43,6 +43,13 @@ export default function Predictions() {
         .slice(0, 6)
     : [];
   const maxWeight = topWeights.length ? Math.max(...topWeights.map(([, value]) => value)) : 1;
+
+  // Poll quietly every minute so an "Awaiting draw" prediction updates to its
+  // hits as soon as the result is recorded — no manual refresh, no spinner.
+  useEffect(() => {
+    const id = setInterval(() => latest.reload({ silent: true }), 60_000);
+    return () => clearInterval(id);
+  }, [latest.reload]);
 
   async function handleGenerate() {
     setGenerating(true);

@@ -2,7 +2,7 @@ import app from "./app";
 import { pool } from "@workspace/db";
 import { logger } from "./lib/logger";
 import { recoverInterruptedJobs, shutdownOptimizerJobs } from "./lib/optimizer-jobs";
-import { runDailyPredictionUpdate } from "./lib/auto-predictions";
+import { runDailyPredictionUpdate, runDrawCheck } from "./lib/auto-predictions";
 
 function resolvePortFromArgv(): string | undefined {
   const args = process.argv.slice(2);
@@ -85,11 +85,28 @@ const OPTIMIZER_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const AUTO_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 const AUTO_UPDATE_INITIAL_DELAY_MS = 15 * 1000;
 
+/**
+ * How often the app checks whether an awaited draw has been published. A stored
+ * prediction stays "Awaiting draw" until its result is recorded, so this polls
+ * every minute and resolves it as soon as the result is available (instead of
+ * waiting for the hourly update). It goes to the source (bypassing the scrape
+ * cache) once the awaited draw is due, and writes no scrape-run audit row.
+ */
+const DRAW_CHECK_INTERVAL_MS = 60 * 1000;
+const DRAW_CHECK_INITIAL_DELAY_MS = 5 * 1000;
+
 function safeAutoUpdate(): void {
   void runDailyPredictionUpdate().catch((error: unknown) => {
     // A failed update must never become an unhandled rejection and take the API
     // process down; it is retried on the next interval.
     logger.error({ error }, "Automatic draw/prediction update failed");
+  });
+}
+
+function safeDrawCheck(): void {
+  void runDrawCheck().catch((error: unknown) => {
+    // Same rule: a failed check is logged and retried on the next minute.
+    logger.error({ error }, "Awaiting-draw check failed");
   });
 }
 
@@ -125,6 +142,14 @@ app.listen(port, (err) => {
   
     const autoUpdateInitial = setTimeout(safeAutoUpdate, AUTO_UPDATE_INITIAL_DELAY_MS);
     autoUpdateInitial.unref();
+
+    // Minute-by-minute "awaiting draw" check: resolve pending predictions as
+    // soon as their result is published.
+    const drawCheck = setInterval(safeDrawCheck, DRAW_CHECK_INTERVAL_MS);
+    drawCheck.unref();
+
+    const drawCheckInitial = setTimeout(safeDrawCheck, DRAW_CHECK_INITIAL_DELAY_MS);
+    drawCheckInitial.unref();
 
   const shutdown = (signal: string): void => {
     logger.info({ signal }, "Shutting down");

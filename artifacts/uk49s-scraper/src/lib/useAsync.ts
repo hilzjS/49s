@@ -6,7 +6,12 @@ export interface AsyncState<T> {
   /** HTTP status of the failure, when one is available (404 = not generated yet). */
   status: number | null;
   loading: boolean;
-  reload: () => void;
+  /**
+   * Re-fetch. Pass `{ silent: true }` for a background refresh that keeps the
+   * current content on screen (no spinner) and ignores transient failures — used
+   * by the periodic "awaiting draw" poll.
+   */
+  reload: (options?: { silent?: boolean }) => void;
 }
 
 /**
@@ -21,12 +26,20 @@ export function useAsync<T>(loader: () => Promise<T>, deps: unknown[] = []): Asy
   const [tick, setTick] = useState(0);
   const loaderRef = useRef(loader);
   loaderRef.current = loader;
+  const silentRef = useRef(false);
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    setError(null);
-    setStatus(null);
+    const silent = silentRef.current;
+    silentRef.current = false;
+
+    // A silent refresh keeps the current content (and any error) on screen.
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+      setStatus(null);
+    }
+
     loaderRef
       .current()
       .then((result) => {
@@ -36,12 +49,12 @@ export function useAsync<T>(loader: () => Promise<T>, deps: unknown[] = []): Asy
         }
       })
       .catch((err: unknown) => {
-        if (active) {
-          const status = (err as { status?: unknown } | null)?.status;
-          setError(err instanceof Error ? err.message : 'Something went wrong');
-          setStatus(typeof status === 'number' ? status : null);
-          setLoading(false);
-        }
+        if (!active) return;
+        setLoading(false);
+        if (silent) return;
+        const status = (err as { status?: unknown } | null)?.status;
+        setError(err instanceof Error ? err.message : 'Something went wrong');
+        setStatus(typeof status === 'number' ? status : null);
       });
     return () => {
       active = false;
@@ -49,7 +62,10 @@ export function useAsync<T>(loader: () => Promise<T>, deps: unknown[] = []): Asy
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, tick]);
 
-  const reload = useCallback(() => setTick((v) => v + 1), []);
+  const reload = useCallback((options?: { silent?: boolean }) => {
+    silentRef.current = options?.silent === true;
+    setTick((v) => v + 1);
+  }, []);
   return { data, error, status, loading, reload };
 }
 

@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Link } from 'wouter';
 import {
   ArrowRight,
@@ -146,6 +147,17 @@ export default function Home() {
   const history = useAsync(() => api.getPredictionHistory('lunchtime', 5), []);
 
   const bt = backtest.data?.backtest;
+
+  // Keep the "Awaiting draw" cards current: while the page is open, poll quietly
+  // every minute so a newly published result flips them to their hits without a
+  // manual reload and without flashing a spinner.
+  useEffect(() => {
+    const id = setInterval(() => {
+      lunch.reload({ silent: true });
+      tea.reload({ silent: true });
+    }, 60_000);
+    return () => clearInterval(id);
+  }, [lunch.reload, tea.reload]);
 
   return (
     <div className="space-y-6">

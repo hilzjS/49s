@@ -82,11 +82,17 @@ function validateDraw(result: DrawResult): { valid: boolean; error?: string } {
   return { valid: true };
 }
 
-// Ingest a single year's data
+// Ingest a single year's data.
+//
+// `recordRun` controls whether a `uk49s_scrape_runs` audit row is written. The
+// minute-by-minute "awaiting draw" refresh passes `false` so it can poll for a
+// newly published result without flooding the scrape-run history with hundreds
+// of near-identical rows per day. Draw ingestion itself is unaffected.
 export async function ingestYear(
   drawType: DrawType,
   year: number,
-  forceRefresh = false
+  forceRefresh = false,
+  recordRun = true
 ): Promise<IngestionResult> {
   const result: IngestionResult = {
     success: false,
@@ -99,39 +105,45 @@ export async function ingestYear(
   };
   
   try {
-    logger.info({ drawType, year }, "Starting ingestion");
+    logger.info({ drawType, year, recordRun }, "Starting ingestion");
     
-    // Create scrape run record
-    const scrapeRunData: InsertUk49sScrapeRun = {
-      drawType,
-      year,
-      sourceUrl: `https://uk.lottonumbers.com/uk49s-${drawType}/results/${year}`,
-      success: false,
-      fromCache: false,
-    };
-    
-    const [scrapeRun] = await db.insert(uk49sScrapeRuns).values(scrapeRunData).returning();
-    result.scrapeRunId = scrapeRun.id;
+    // Create scrape run record (skipped for the quiet awaiting-draw refresh).
+    let scrapeRunId: number | undefined;
+    if (recordRun) {
+      const scrapeRunData: InsertUk49sScrapeRun = {
+        drawType,
+        year,
+        sourceUrl: `https://uk.lottonumbers.com/uk49s-${drawType}/results/${year}`,
+        success: false,
+        fromCache: false,
+      };
+      
+      const [scrapeRun] = await db.insert(uk49sScrapeRuns).values(scrapeRunData).returning();
+      scrapeRunId = scrapeRun.id;
+      result.scrapeRunId = scrapeRun.id;
+    }
     
     // Scrape data
     const scrapeResponse = await scrapeYear(drawType, year, forceRefresh);
     
     // Update scrape run with results
-    await db.update(uk49sScrapeRuns)
-      .set({
-        urlsRequested: scrapeResponse.stats.urlsRequested,
-        recordsDiscovered: scrapeResponse.stats.recordsDiscovered,
-        recordsAccepted: scrapeResponse.stats.recordsAccepted,
-        duplicatesRemoved: scrapeResponse.stats.duplicatesRemoved,
-        recordsRejected: scrapeResponse.stats.recordsRejected,
-        parsingErrors: scrapeResponse.stats.parsingErrors,
-        failedUrls: scrapeResponse.stats.failedUrls,
-        validationErrors: scrapeResponse.stats.validationErrors,
-        success: scrapeResponse.success,
-        fromCache: scrapeResponse.stats.fromCache,
-        completedAt: new Date(),
-      })
-      .where(eq(uk49sScrapeRuns.id, scrapeRun.id));
+    if (scrapeRunId !== undefined) {
+      await db.update(uk49sScrapeRuns)
+        .set({
+          urlsRequested: scrapeResponse.stats.urlsRequested,
+          recordsDiscovered: scrapeResponse.stats.recordsDiscovered,
+          recordsAccepted: scrapeResponse.stats.recordsAccepted,
+          duplicatesRemoved: scrapeResponse.stats.duplicatesRemoved,
+          recordsRejected: scrapeResponse.stats.recordsRejected,
+          parsingErrors: scrapeResponse.stats.parsingErrors,
+          failedUrls: scrapeResponse.stats.failedUrls,
+          validationErrors: scrapeResponse.stats.validationErrors,
+          success: scrapeResponse.success,
+          fromCache: scrapeResponse.stats.fromCache,
+          completedAt: new Date(),
+        })
+        .where(eq(uk49sScrapeRuns.id, scrapeRunId));
+    }
     
     // Process each draw result
     for (const drawResult of scrapeResponse.results) {
@@ -158,7 +170,7 @@ export async function ingestYear(
           drawResult.winning_numbers,
           drawResult.booster_ball,
           scrapeResponse.source,
-          scrapeRun.id
+          scrapeRunId
         );
         
         await db.insert(uk49sDraws).values(drawData);
@@ -181,10 +193,14 @@ export async function ingestYear(
 }
 
 // Ingest both Lunchtime and Teatime for a year
-export async function ingestYearBoth(year: number, forceRefresh = false): Promise<FullIngestionResult> {
+export async function ingestYearBoth(
+  year: number,
+  forceRefresh = false,
+  recordRun = true
+): Promise<FullIngestionResult> {
   const [lunchResult, teaResult] = await Promise.all([
-    ingestYear("lunchtime", year, forceRefresh),
-    ingestYear("teatime", year, forceRefresh),
+    ingestYear("lunchtime", year, forceRefresh, recordRun),
+    ingestYear("teatime", year, forceRefresh, recordRun),
   ]);
   
   return {
@@ -271,6 +287,18 @@ function combineResults(results: IngestionResult[]): IngestionResult {
 export async function updateLatestDraws(): Promise<FullIngestionResult> {
   const currentYear = new Date().getUTCFullYear();
   return ingestYearBoth(currentYear, false);
+}
+
+// Refresh the latest draws WITHOUT writing a scrape-run audit row. Used by the
+// minute-by-minute "awaiting draw" check, which must poll frequently for a newly
+// published result without drowning the scrape-run history in audit rows.
+//
+// `forceRefresh` bypasses the 15-minute scrape cache by default — otherwise a
+// per-minute poll could keep serving a cached page and miss the new result for
+// up to 15 minutes, which would defeat the point of checking every minute.
+export async function refreshLatestDrawsQuietly(forceRefresh = true): Promise<FullIngestionResult> {
+  const currentYear = new Date().getUTCFullYear();
+  return ingestYearBoth(currentYear, forceRefresh, false);
 }
 
 // Get data summary
