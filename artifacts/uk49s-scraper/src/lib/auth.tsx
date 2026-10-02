@@ -23,7 +23,10 @@ interface AuthState {
   user: User | null;
   profile: Profile | null;
   isAdmin: boolean;
+  /** True while the initial session is being restored. */
   loading: boolean;
+  /** True while the profile row is being fetched. */
+  profileLoading: boolean;
   signIn: (email: string, password: string) => Promise<{ error: string | null }>;
   signUp: (
     email: string,
@@ -36,44 +39,61 @@ interface AuthState {
 
 const AuthContext = createContext<AuthState | undefined>(undefined);
 
+/**
+ * Supabase calls can hang when the project is slow or unreachable. Every auth
+ * round-trip is bounded so the UI can never be trapped on a loading spinner.
+ */
+const AUTH_TIMEOUT_MS = 10000;
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [profileLoading, setProfileLoading] = useState(false);
 
   const loadProfile = useCallback(async (userId: string) => {
+    setProfileLoading(true);
     try {
-      const { data } = await supabase
+      const query = supabase
         .from('profiles')
         .select('id, email, full_name, role, plan_id')
         .eq('id', userId)
         .maybeSingle();
-      setProfile((data as Profile | null) ?? null);
+      const result = await Promise.race([
+        Promise.resolve(query),
+        new Promise<{ data: Profile | null }>((resolve) =>
+          setTimeout(() => resolve({ data: null }), AUTH_TIMEOUT_MS),
+        ),
+      ]);
+      setProfile((result.data as Profile | null) ?? null);
     } catch {
-      // Supabase unreachable (e.g. offline or project disconnected): keep the
-      // session but fall back to a null profile so the app still renders.
+      // Supabase unreachable (offline / project disconnected): fall back to a
+      // null profile so the app still renders instead of hanging.
       setProfile(null);
+    } finally {
+      setProfileLoading(false);
     }
   }, []);
 
   useEffect(() => {
     let active = true;
 
-    supabase.auth
-      .getSession()
-      .then(({ data }) => {
-        if (!active) return;
-        setSession(data.session);
-        if (data.session?.user) {
-          loadProfile(data.session.user.id).finally(() => active && setLoading(false));
-        } else {
-          setLoading(false);
-        }
-      })
-      .catch(() => {
-        // Never leave the app stuck on the loading screen when auth is unreachable.
-        if (active) setLoading(false);
-      });
+    (async () => {
+      // Bound the session restore so a hanging auth call cannot wedge startup.
+      const result = await Promise.race([
+        supabase.auth.getSession(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), AUTH_TIMEOUT_MS)),
+      ]);
+      if (!active) return;
+      const nextSession = result?.data?.session ?? null;
+      setSession(nextSession);
+      setLoading(false);
+      if (nextSession?.user) {
+        void loadProfile(nextSession.user.id);
+      } else {
+        setProfileLoading(false);
+      }
+    })();
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
@@ -81,6 +101,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         void loadProfile(nextSession.user.id);
       } else {
         setProfile(null);
+        setProfileLoading(false);
       }
     });
 
@@ -110,6 +131,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signOut = useCallback(async () => {
     await supabase.auth.signOut();
     setProfile(null);
+    setProfileLoading(false);
   }, []);
 
   const refreshProfile = useCallback(async () => {
@@ -124,12 +146,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       profile,
       isAdmin: profile?.role === 'admin',
       loading,
+      profileLoading,
       signIn,
       signUp,
       signOut,
       refreshProfile,
     }),
-    [session, profile, loading, signIn, signUp, signOut, refreshProfile],
+    [session, profile, loading, profileLoading, signIn, signUp, signOut, refreshProfile],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
