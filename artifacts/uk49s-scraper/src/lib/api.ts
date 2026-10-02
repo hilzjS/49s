@@ -141,6 +141,8 @@ export interface ModelInfo {
 
 export interface BacktestRun {
   id: number;
+  /** A valid run completed and resolved at least one draw. */
+  valid?: boolean;
   /** Statistics are only counted since the active model was applied. */
   statsSince?: string | null;
   totalPredictions: number;
@@ -166,6 +168,8 @@ export interface BacktestRun {
 
 export interface BacktestHistoryItem {
   id: number;
+  /** False for zero-draw/failed runs kept only for audit: not counted as completed. */
+  valid?: boolean;
   lookbackWindow: number;
   testPeriod: { startDate: string; endDate: string };
   totalPredictions: number;

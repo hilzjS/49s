@@ -58,9 +58,7 @@ export default function AdminBacktesting() {
   async function run() {
     if (latestDrawDate && testEndDate >= latestDrawDate) {
       setMessage(null);
-      setError(
-        `Test end must be before the latest ${label} draw (${latestDrawDate}) — the engine needs a later draw to close the window, otherwise it returns zero predictions.`,
-      );
+      setError(`Test end must be before the latest available draw (${latestDrawDate}).`);
       return;
     }
 
@@ -79,6 +77,8 @@ export default function AdminBacktesting() {
       if (usingActiveModel && activeModel) {
         body.weights = activeModel.weights;
         body.constraints = activeModel.constraints;
+        // Capture the exact model the backtest was executed against.
+        body.modelConfigId = activeModel.id;
       }
 
       await api.runBacktest(body);
@@ -173,9 +173,17 @@ export default function AdminBacktesting() {
               <>
                 Backtesting the active {label} model{' '}
                 <span className="mono text-[var(--text-2)]">v{activeModel.version}</span> · lookback{' '}
-                <span className="mono text-[var(--text-2)]">{activeModel.lookbackWindow}</span> · validation 4-hit{' '}
+                <span className="mono text-[var(--text-2)]">{activeModel.lookbackWindow}</span> · Validation config: 4-hit{' '}
                 <span className="mono text-[var(--text-2)]">{percent(activeModel.validationMetrics?.fourHitRate ?? null)}</span>{' '}
-                over {activeModel.validationMetrics?.sampleSize ?? '—'} draws. Uncheck to run the default weights.
+                over{' '}
+                <span className="mono text-[var(--text-2)]">{activeModel.validationMetrics?.sampleSize ?? '—'} draws</span>
+                {bt ? (
+                  <>
+                    {' '}· Actual OOS sample:{' '}
+                    <span className="mono text-[var(--text-2)]">{bt.totalPredictions} draws</span>
+                  </>
+                ) : null}
+                . Uncheck to run the default weights.
               </>
             ) : (
               `No active ${label} model yet — the backtest will run with the default weights. Apply an optimizer result to test the optimized model.`
@@ -262,6 +270,19 @@ export default function AdminBacktesting() {
                 </thead>
                 <tbody>
                   {history.data.backtests.map((run) => {
+                    // Zero-draw / failed runs are kept for audit but must never
+                    // read as a completed backtest.
+                    if (run.valid === false) {
+                      return (
+                        <tr key={run.id}>
+                          <td className="strong">{formatDate(run.completedAt)}</td>
+                          <td colSpan={5} className="text-[11.5px] text-[var(--text-3)]">
+                            <Badge tone="neutral">Invalid</Badge>
+                            <span className="ml-2">No resolved draws — not counted in statistics</span>
+                          </td>
+                        </tr>
+                      );
+                    }
                     const diff =
                       run.avgMainHits != null && run.baselines.random.avgMainHits != null
                         ? run.avgMainHits - run.baselines.random.avgMainHits

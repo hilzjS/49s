@@ -1,6 +1,6 @@
 /**
  * UK49s Backtest API Routes
- * 
+ *
  * Handles walk-forward validation and baseline comparisons.
  */
 
@@ -18,12 +18,27 @@ import {
   type LookbackComparison,
 } from "@workspace/db/schema";
 import { DEFAULT_WEIGHTS, type FeatureWeights } from "@workspace/db/schema";
-import { eq, and, desc, gte } from "drizzle-orm";
+import { eq, and, desc, gte, gt } from "drizzle-orm";
 import { logger } from "../lib/logger";
 import { requireAdmin } from "../lib/admin-auth";
 import { getStatsCutoff } from "../lib/stats-scope";
 
 const router: IRouter = Router();
+
+/**
+ * A stored backtest only counts as a valid, completed result when it finished
+ * AND actually resolved at least one draw. Zero-draw runs are kept for audit
+ * but never counted toward statistics or shown as successful backtests.
+ */
+function isValidBacktest(run: { status: string; totalPredictions: number }): boolean {
+  return run.status === "completed" && run.totalPredictions > 0;
+}
+
+/** SQL predicate matching the conditions above (used to scope statistics). */
+const validBacktestWhere = and(
+  eq(uk49sBacktestRuns.status, "completed"),
+  gt(uk49sBacktestRuns.totalPredictions, 0),
+);
 
 // Run walk-forward backtest
 router.post("/run", requireAdmin, async (req, res) => {
@@ -36,6 +51,10 @@ router.post("/run", requireAdmin, async (req, res) => {
   if (!testStartDate || !testEndDate) {
     res.status(400).json({ error: "testStartDate and testEndDate are required" }); return;
   }
+
+  if (String(testStartDate) >= String(testEndDate)) {
+    res.status(400).json({ error: "Test start must be before test end." }); return;
+  }
   
   try {
     // Get all historical draws
@@ -44,6 +63,22 @@ router.post("/run", requireAdmin, async (req, res) => {
       .from(uk49sDraws)
       .where(eq(uk49sDraws.drawType, drawType))
       .orderBy(uk49sDraws.drawDate);
+
+    if (draws.length === 0) {
+      res.status(400).json({ error: `No ${drawType} draws are available to backtest.` }); return;
+    }
+
+    // The walk-forward engine closes the test window with the first draw AFTER
+    // testEndDate. When no such draw exists, it silently resolves zero draws and
+    // used to persist an empty "completed" run. Enforce the boundary here against
+    // the ACTUAL latest available draw for this draw type — never trust the
+    // frontend. The requested date is rejected as-is, never silently adjusted.
+    const latestDrawDate = draws[draws.length - 1].drawDate;
+    if (String(testEndDate) >= latestDrawDate) {
+      res.status(400).json({
+        error: `Test end must be before the latest available draw (${latestDrawDate}).`,
+      }); return;
+    }
     
     if (draws.length < (lookbackWindow || 90)) {
       res.status(400).json({ 
@@ -76,17 +111,78 @@ router.post("/run", requireAdmin, async (req, res) => {
 
     // Run full backtest with baselines
     const result = runFullBacktest(draws, config, modelWeights, modelConstraints);
-    
-    // Store backtest run
+
+    const resolvedDraws = result.superhybrid.totalPredictions;
+
+    // A backtest is only a completed backtest if it actually resolved draws.
+    // Never create a successful history record (or touch model statistics) for
+    // an empty run.
+    if (resolvedDraws === 0) {
+      res.status(400).json({
+        error: "No resolved draws were available in the selected validation window. No backtest was saved.",
+      }); return;
+    }
+
+    // Defensive assertion: the hit distribution must account for exactly the
+    // resolved predictions. A mismatch means inconsistent statistics — fail the
+    // run instead of persisting it.
+    const hitDistributionSum = result.superhybrid.hitDistribution.reduce(
+      (sum, entry) => sum + entry.count,
+      0,
+    );
+    if (hitDistributionSum !== resolvedDraws) {
+      logger.error(
+        { drawType, hitDistributionSum, resolvedDraws },
+        "Backtest hit distribution does not sum to the resolved draw count",
+      );
+      res.status(500).json({
+        error: `Backtest produced an inconsistent hit distribution (${hitDistributionSum} accounted for vs ${resolvedDraws} resolved draws). No backtest was saved.`,
+      }); return;
+    }
+
+    // The random and frequency baselines must be evaluated over the exact same
+    // resolved draws as the model — otherwise the comparison is meaningless.
+    if (
+      result.randomBaseline.totalPredictions !== resolvedDraws ||
+      result.frequencyBaseline.totalPredictions !== resolvedDraws
+    ) {
+      logger.error(
+        {
+          drawType,
+          resolvedDraws,
+          randomDraws: result.randomBaseline.totalPredictions,
+          frequencyDraws: result.frequencyBaseline.totalPredictions,
+        },
+        "Backtest baselines were evaluated over a different sample than the model",
+      );
+      res.status(500).json({
+        error: "Backtest baselines did not cover the same resolved draws as the model. No backtest was saved.",
+      }); return;
+    }
+
+    // Report the draws that were ACTUALLY evaluated, not the requested calendar
+    // range. The two can differ when the window is clipped by the history edges.
+    const evaluated = result.superhybrid.predictions;
+    const actualStartDate = evaluated[0]?.predictionDate ?? String(testStartDate);
+    const actualEndDate = evaluated[evaluated.length - 1]?.predictionDate ?? String(testEndDate);
+
+    // Capture the exact model that was evaluated (when the caller identifies it),
+    // alongside the lookback window actually used.
+    const modelConfigId = Number.isFinite(Number(req.body.modelConfigId))
+      ? Number(req.body.modelConfigId)
+      : null;
+
+    // Store backtest run — only after validation and full completion.
     await db.insert(uk49sBacktestRuns).values({
       drawType,
       status: "completed",
+      modelConfigId,
       lookbackWindow: config.lookbackWindow,
-      testStartDate,
-      testEndDate,
+      testStartDate: actualStartDate,
+      testEndDate: actualEndDate,
       includeRandomBaseline: true,
       includeFrequencyBaseline: true,
-      totalPredictions: result.superhybrid.totalPredictions,
+      totalPredictions: resolvedDraws,
       hit0Count: result.superhybrid.hitDistribution.find(h => h.hits === 0)?.count || 0,
       hit1Count: result.superhybrid.hitDistribution.find(h => h.hits === 1)?.count || 0,
       hit2Count: result.superhybrid.hitDistribution.find(h => h.hits === 2)?.count || 0,
@@ -112,9 +208,10 @@ router.post("/run", requireAdmin, async (req, res) => {
     res.json({
       success: true,
       backtest: {
-        totalPredictions: result.superhybrid.totalPredictions,
-        testPeriod: { startDate: testStartDate, endDate: testEndDate },
+        totalPredictions: resolvedDraws,
+        testPeriod: { startDate: actualStartDate, endDate: actualEndDate },
         lookbackWindow: config.lookbackWindow,
+        valid: true,
         superhybrid: {
           hitDistribution: result.superhybrid.hitDistribution,
           avgMainHits: result.superhybrid.avgMainHits,
@@ -218,7 +315,9 @@ router.get("/history/:drawType", async (req, res) => {
         statsSince: statsSince ? statsSince.toISOString() : null,
         backtests: runs.map(r => ({
         id: r.id,
+        valid: isValidBacktest(r),
         lookbackWindow: r.lookbackWindow,
+        // Period is the actual evaluated draw range stored at completion time.
         testPeriod: { startDate: r.testStartDate, endDate: r.testEndDate },
         totalPredictions: r.totalPredictions,
         avgMainHits: r.avgMainHits,
@@ -251,21 +350,23 @@ router.get("/latest/:drawType", async (req, res) => {
   }
   
   try {
-      // A backtest only counts while it belongs to the current model.
+      // A backtest only counts while it belongs to the current model AND it is a
+      // valid, completed run that resolved at least one draw. Empty/failed runs
+      // are ignored so they cannot drive the displayed statistics.
       const statsSince = await getStatsCutoff(drawType);
       const [run] = await db
         .select()
         .from(uk49sBacktestRuns)
         .where(
           statsSince
-            ? and(eq(uk49sBacktestRuns.drawType, drawType), gte(uk49sBacktestRuns.completedAt, statsSince))
-            : eq(uk49sBacktestRuns.drawType, drawType)
+            ? and(eq(uk49sBacktestRuns.drawType, drawType), gte(uk49sBacktestRuns.completedAt, statsSince), validBacktestWhere)
+            : and(eq(uk49sBacktestRuns.drawType, drawType), validBacktestWhere)
         )
         .orderBy(desc(uk49sBacktestRuns.completedAt))
         .limit(1);
       
       if (!run) {
-        res.status(404).json({ error: "No backtest has been run for the current model yet" }); return;
+        res.status(404).json({ error: "No valid backtest has been run for the current model yet" }); return;
       }
     
     const hitDistribution = [
@@ -306,6 +407,7 @@ router.get("/latest/:drawType", async (req, res) => {
           statsSince: statsSince ? statsSince.toISOString() : null,
           backtest: {
             id: run.id,
+        valid: true,
         totalPredictions: run.totalPredictions,
         testPeriod: { startDate: run.testStartDate, endDate: run.testEndDate },
         lookbackWindow: run.lookbackWindow,
