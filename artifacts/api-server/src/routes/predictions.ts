@@ -1,7 +1,7 @@
 /**
  * UK49s Predictions API Routes
  *
- * Handles prediction generation, retrieval, and history.
+ * Handles prediction generation, retrieval and history using the single engine.
  */
 
 import { Router, type IRouter, type Request, type Response } from "express";
@@ -13,7 +13,7 @@ import {
   getModelHistory,
   getNextPredictionDate,
 } from "../lib/prediction-service";
-import { getLastShowdown, runStrategyShowdown } from "../lib/strategy-showdown";
+import { DEFAULT_WEIGHTS, MAIN_COUNT } from "@workspace/db/schema";
 import { logger } from "../lib/logger";
 import { requireAdmin } from "../lib/admin-auth";
 import { getStatsCutoff } from "../lib/stats-scope";
@@ -24,7 +24,29 @@ function validDrawType(value: string): value is "lunchtime" | "teatime" {
   return value === "lunchtime" || value === "teatime";
 }
 
-// Get active model for a draw type
+const WARNING =
+  "These are statistical pattern predictions based on historical data. Lottery outcomes are random and cannot be guaranteed.";
+
+/** Serialises the engine's model/champion state for the client. */
+function modelPayload(model: Awaited<ReturnType<typeof getActiveModel>>) {
+  if (!model) {
+    return {
+      id: null,
+      drawType: null,
+      version: "defaults",
+      weights: DEFAULT_WEIGHTS,
+      threePlusCount: null,
+      avgHitsPerLine: null,
+      candidatesTested: null,
+      targetMet: false,
+      createdAt: null,
+      updatedAt: null,
+    };
+  }
+  return model;
+}
+
+// Get active model (locked champion) for a draw type
 router.get("/model/:drawType", async (req: Request, res: Response) => {
   const drawType = String(req.params.drawType);
   if (!validDrawType(drawType)) {
@@ -34,34 +56,7 @@ router.get("/model/:drawType", async (req: Request, res: Response) => {
 
   try {
     const model = await getActiveModel(drawType);
-
-    if (!model) {
-      res.status(404).json({ error: "No active model found" });
-      return;
-    }
-
-    res.json({
-      success: true,
-      model: {
-              id: model.id,
-              drawType: model.drawType,
-              version: model.version,
-              status: model.status,
-              strategy: model.strategy,
-              poolSize: model.poolSize,
-              weights: model.weights,
-              lookbackWindow: model.lookbackWindow,
-        constraints: model.constraints,
-        trainingCutoff: model.trainingCutoff,
-        validationMetrics: model.validation4HitRate !== null ? {
-          fourHitRate: model.validation4HitRate,
-          avgHits: model.validationAvgHits,
-          sampleSize: model.validationSampleSize,
-        } : null,
-        createdAt: model.createdAt,
-        updatedAt: model.updatedAt,
-      },
-    });
+    res.json({ success: true, model: modelPayload(model) });
   } catch (error) {
     logger.error({ error, drawType }, "Failed to get model");
     res.status(500).json({ success: false, error: "Failed to get model" });
@@ -78,56 +73,14 @@ router.get("/model/:drawType/history", async (req: Request, res: Response) => {
 
   try {
     const history = await getModelHistory(drawType);
-
-    res.json({
-      success: true,
-      count: history.length,
-      models: history.map((m) => ({
-              id: m.id,
-              version: m.version,
-              status: m.status,
-              strategy: m.strategy,
-              poolSize: m.poolSize,
-              weights: m.weights,
-              lookbackWindow: m.lookbackWindow,
-        constraints: m.constraints,
-        validationMetrics: m.validation4HitRate !== null ? {
-          fourHitRate: m.validation4HitRate,
-          avgHits: m.validationAvgHits,
-          sampleSize: m.validationSampleSize,
-        } : null,
-        createdAt: m.createdAt,
-      })),
-    });
+    res.json({ success: true, count: history.length, models: history });
   } catch (error) {
     logger.error({ error, drawType }, "Failed to get model history");
     res.status(500).json({ success: false, error: "Failed to get model history" });
   }
 });
 
-// Engine showdown: both engines evaluated, winner picked for the next draw
-router.get("/showdown/:drawType", async (req: Request, res: Response) => {
-  const drawType = String(req.params.drawType);
-  if (!validDrawType(drawType)) {
-    res.status(400).json({ error: "drawType must be 'lunchtime' or 'teatime'" });
-    return;
-  }
-
-  try {
-    // Cached result unless a newer draw has been recorded since the last run.
-    const showdown = getLastShowdown(drawType) ?? (await runStrategyShowdown(drawType));
-
-    res.json({ success: true, showdown });
-  } catch (error) {
-    logger.error({ error, drawType }, "Failed to run the engine showdown");
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : "Engine showdown failed",
-    });
-  }
-});
-
-// Generate new prediction
+// Generate a new prediction
 router.post("/generate", requireAdmin, async (req: Request, res: Response) => {
   const { drawType, predictionDate } = req.body ?? {};
 
@@ -137,23 +90,23 @@ router.post("/generate", requireAdmin, async (req: Request, res: Response) => {
   }
 
   try {
-      /**
-       * Default to the next draw that has not been recorded yet (the day after
-       * the latest stored draw) — NOT `now + 1 day`. Using the wall clock would
-       * let a prediction skip a draw whose result is not in yet (e.g. producing a
-       * 23 Sep prediction before the 22 Sep draw had happened).
-       */
-      let targetDate: string;
-      if (typeof predictionDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(predictionDate)) {
-        targetDate = predictionDate;
-      } else {
-        const nextDate = await getNextPredictionDate(drawType as "lunchtime" | "teatime");
-        if (!nextDate) {
-          res.status(400).json({ success: false, error: `No ${drawType} draws recorded yet — nothing to predict from.` });
-          return;
-        }
-        targetDate = nextDate;
+    /**
+     * Default to the next draw that has not been recorded yet (the day after the
+     * latest stored draw) — NOT `now + 1 day`, which would let a prediction skip
+     * a draw whose result is missing.
+     */
+    let targetDate: string;
+    if (typeof predictionDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(predictionDate)) {
+      targetDate = predictionDate;
+    } else {
+      const nextDate = await getNextPredictionDate(drawType);
+      if (!nextDate) {
+        res.status(400).json({ success: false, error: `No ${drawType} draws recorded yet — nothing to predict from.` });
+        return;
       }
+      targetDate = nextDate;
+    }
+
     const result = await generateAndStorePrediction(drawType, targetDate);
 
     if (!result.success) {
@@ -161,18 +114,14 @@ router.post("/generate", requireAdmin, async (req: Request, res: Response) => {
       return;
     }
 
-    res.json({
-      success: true,
-      prediction: result.prediction,
-      warning: "These are statistical pattern predictions based on historical data. Lottery outcomes are random and cannot be guaranteed.",
-    });
+    res.json({ success: true, prediction: result.prediction, warning: WARNING });
   } catch (error) {
     logger.error({ error, drawType, predictionDate }, "Failed to generate prediction");
     res.status(500).json({ success: false, error: "Failed to generate prediction" });
   }
 });
 
-// Get latest prediction
+// Latest prediction
 router.get("/latest/:drawType", async (req: Request, res: Response) => {
   const drawType = String(req.params.drawType);
   if (!validDrawType(drawType)) {
@@ -182,26 +131,18 @@ router.get("/latest/:drawType", async (req: Request, res: Response) => {
 
   try {
     const prediction = await getLatestPrediction(drawType);
-
     if (!prediction) {
       res.status(404).json({ error: "No predictions found" });
       return;
     }
-
-    res.json({
-      success: true,
-      prediction: {
-        ...prediction,
-        warning: "These are statistical pattern predictions based on historical data. Lottery outcomes are random and cannot be guaranteed.",
-      },
-    });
+    res.json({ success: true, prediction: { ...prediction, warning: WARNING } });
   } catch (error) {
     logger.error({ error, drawType }, "Failed to get latest prediction");
     res.status(500).json({ success: false, error: "Failed to get latest prediction" });
   }
 });
 
-// Get prediction history
+// Prediction history
 router.get("/history/:drawType", async (req: Request, res: Response) => {
   const drawType = String(req.params.drawType);
   if (!validDrawType(drawType)) {
@@ -213,19 +154,16 @@ router.get("/history/:drawType", async (req: Request, res: Response) => {
   const offset = parseInt(String(req.query.offset ?? "0"), 10) || 0;
 
   try {
-      // Only count predictions made by the current model, so results from a
-      // previous model do not mix into the statistics.
-      const statsSince = await getStatsCutoff(drawType);
-      const predictions = await getPredictionHistory(drawType, limit, offset, statsSince);
-  
-      res.json({
-        success: true,
-        count: predictions.length,
-        statsSince: statsSince ? statsSince.toISOString() : null,
-        predictions: predictions.map((p) => ({
-        ...p,
-        warning: "These are statistical pattern predictions based on historical data. Lottery outcomes are random and cannot be guaranteed.",
-      })),
+    // Only count predictions made by the current model.
+    const statsSince = await getStatsCutoff(drawType);
+    const predictions = await getPredictionHistory(drawType, limit, offset, statsSince);
+
+    res.json({
+      success: true,
+      count: predictions.length,
+      lineSize: MAIN_COUNT,
+      statsSince: statsSince ? statsSince.toISOString() : null,
+      predictions: predictions.map((p) => ({ ...p, warning: WARNING })),
     });
   } catch (error) {
     logger.error({ error, drawType }, "Failed to get prediction history");

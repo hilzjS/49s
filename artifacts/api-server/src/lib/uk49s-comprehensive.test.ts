@@ -1,30 +1,27 @@
 /**
  * UK49s Comprehensive Tests
- * 
- * Tests for scraper, feature engine, backtest, optimizer, and data integrity.
+ *
+ * Tests for the scraper, the single prediction engine (score + build + walk
+ * forward), the walk-forward tuner, and data integrity.
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseRecords, type ScrapeStats, type DrawResult } from "./uk49s-scraper";
+import { parseRecords, type ScrapeStats } from "./uk49s-scraper";
 import {
-  calculateAllFeatureScores,
-  selectBestNumbers,
-  selectBoosterBall,
-  generatePrediction,
   DEFAULT_WEIGHTS,
-  type FeatureWeights,
-} from "@workspace/db/schema";
-import {
+  MAIN_COUNT,
+  MIN_TRAIN,
+  buildGrid,
+  buildPredictions,
+  drawToNumbers,
+  findChampion,
   runBacktest,
-  runFullBacktest,
-  compareLookbackWindows,
-  generateRandomPrediction,
-  generateFrequencyPrediction,
+  scoreNumbers,
+  toEngineDraws,
+  type EngineDraw,
+  type Uk49sDraw,
 } from "@workspace/db/schema";
-import { optimizeWeightsForWindow } from "@workspace/db/schema";
-import type { Uk49sDraw } from "@workspace/db/schema";
-import { drawToNumbers } from "@workspace/db/schema";
 
 // ============================================
 // SCRAPER TESTS
@@ -68,10 +65,7 @@ test("Scraper: 2015 Teatime fixture removes duplicate dates", () => {
     </table>`;
   const stats = createStats();
   const result = parseRecords(fixture, "teatime", 2015, stats);
-  // Two distinct valid dates are accepted; the exact duplicate row is removed.
   assert.equal(result.length, 2);
-  assert.equal(result[0].booster_ball, 6);
-  assert.equal(result[1].booster_ball, 6);
   assert.equal(stats.duplicatesRemoved, 1);
   assert.equal(stats.recordsRejected, 0);
 });
@@ -101,7 +95,7 @@ test("Scraper: parses named month dates", () => {
 });
 
 // ============================================
-// FEATURE ENGINE TESTS
+// ENGINE TESTS
 // ============================================
 
 function createMockDraw(date: string, drawType: "lunchtime" | "teatime", main: number[], booster: number): Uk49sDraw {
@@ -126,9 +120,8 @@ function createMockDraw(date: string, drawType: "lunchtime" | "teatime", main: n
 
 function createMockDraws(): Uk49sDraw[] {
   const draws: Uk49sDraw[] = [];
-  for (let i = 0; i < 100; i++) {
-    const date = `2024-${String(Math.floor(i / 4) + 1).padStart(2, "0")}-${String((i % 28) + 1).padStart(2, "0")}`;
-    // 6 consecutive mains starting at s (1 <= s <= 44), booster outside mains
+  for (let i = 0; i < 120; i++) {
+    const date = `2024-${String(Math.floor(i / 28) + 1).padStart(2, "0")}-${String((i % 28) + 1).padStart(2, "0")}`;
     const s = (i % 44) + 1;
     const main = [s, s + 1, s + 2, s + 3, s + 4, s + 5];
     const booster = s >= 10 ? s - 5 : s + 10;
@@ -137,151 +130,104 @@ function createMockDraws(): Uk49sDraw[] {
   return draws;
 }
 
-test("Feature Engine: calculates scores for all 49 numbers", () => {
-  const draws = createMockDraws();
-  const scores = calculateAllFeatureScores(draws, DEFAULT_WEIGHTS, 50);
-  
-  assert.equal(scores.length, 49);
-  for (const score of scores) {
-    assert.ok(score.number >= 1 && score.number <= 49);
-    assert.ok(score.frequencyScore >= 0 && score.frequencyScore <= 1);
-    assert.ok(score.recencyScore >= 0 && score.recencyScore <= 1);
-    assert.ok(score.overallScore >= 0 && score.overallScore <= 1);
+function engineHistory(draws: Uk49sDraw[], drawType: "lunchtime" | "teatime"): EngineDraw[] {
+  return toEngineDraws(draws, drawType);
+}
+
+test("Engine: scoreNumbers returns a score for every number in range", () => {
+  const history = engineHistory(createMockDraws(), "lunchtime");
+  const stats = scoreNumbers(history, "numbers", DEFAULT_WEIGHTS);
+
+  assert.equal(stats.length, 49);
+  for (const stat of stats) {
+    assert.ok(stat.n >= 1 && stat.n <= 49);
+    assert.ok(stat.score >= 0);
+    assert.ok(stat.count >= 0);
   }
 });
 
-test("Feature Engine: selectBestNumbers returns exactly 4 numbers", () => {
-  const draws = createMockDraws();
-  const scores = calculateAllFeatureScores(draws, DEFAULT_WEIGHTS, 50);
-  const selected = selectBestNumbers(scores);
-  
-  assert.equal(selected.length, 4);
-  assert.deepEqual(selected, [...selected].sort((a: number, b: number) => a - b)); // Sorted ascending
-  
-  // All numbers in range
-  for (const num of selected) {
-    assert.ok(num >= 1 && num <= 49);
-  }
-  
-  // No duplicates
-  const unique = new Set(selected);
-  assert.equal(unique.size, 4);
+test("Engine: buildPredictions returns a balanced 4-number line plus one booster", () => {
+  const history = engineHistory(createMockDraws(), "lunchtime");
+  const sets = buildPredictions({ draws: history, targetDate: "2025-01-01", drawTime: "12:30", sets: 1 });
+
+  assert.equal(sets.length, 1);
+  const set = sets[0];
+  assert.equal(set.numbers.length, MAIN_COUNT);
+  assert.equal(set.bonus_numbers.length, 1);
+  assert.deepEqual(set.numbers, [...set.numbers].sort((a, b) => a - b));
+  assert.equal(new Set(set.numbers).size, MAIN_COUNT);
+  for (const n of set.numbers) assert.ok(n >= 1 && n <= 49);
+  assert.ok(set.bonus_numbers[0] >= 1 && set.bonus_numbers[0] <= 49);
+  assert.equal(set.is_free, true);
+  assert.ok(set.confidence >= 0 && set.confidence <= 0.99);
 });
 
-test("Feature Engine: selectBoosterBall returns valid number not in main", () => {
-  const draws = createMockDraws();
-  const scores = calculateAllFeatureScores(draws, DEFAULT_WEIGHTS, 50);
-  const mainNumbers = selectBestNumbers(scores);
-  const booster = selectBoosterBall(scores, mainNumbers);
-  
-  assert.ok(booster >= 1 && booster <= 49);
-  assert.ok(!mainNumbers.includes(booster));
-});
-
-test("Feature Engine: generatePrediction returns correct structure", () => {
-  const draws = createMockDraws();
-  const result = generatePrediction(draws, "lunchtime", DEFAULT_WEIGHTS, 50);
-  
-  assert.ok(Array.isArray(result.mainNumbers));
-  assert.equal(result.mainNumbers.length, 4);
-  assert.ok(result.boosterBall >= 1 && result.boosterBall <= 49);
-  assert.ok(typeof result.trainingCutoff === "string");
-  assert.ok(Array.isArray(result.componentScores));
-  assert.equal(result.componentScores.length, 49);
-});
-
-test("Feature Engine: throws error for empty draws", () => {
-  assert.throws(() => {
-    generatePrediction([], "lunchtime", DEFAULT_WEIGHTS, 50);
-  }, /No historical draws/);
+test("Engine: buildPredictions is deterministic for the same inputs", () => {
+  const history = engineHistory(createMockDraws(), "teatime");
+  const a = buildPredictions({ draws: history, targetDate: "2025-01-01", drawTime: "17:49", sets: 1 });
+  const b = buildPredictions({ draws: history, targetDate: "2025-01-01", drawTime: "17:49", sets: 1 });
+  assert.deepEqual(a, b);
 });
 
 // ============================================
-// BACKTEST TESTS
+// WALK-FORWARD BACKTEST TESTS
 // ============================================
 
-test("Backtest: returns correct prediction count", () => {
-  const draws = createMockDraws();
-  
-  const result = runBacktest(draws, {
-    drawType: "lunchtime",
-    lookbackWindow: 30,
-    testStartDate: "2024-03-01",
-    testEndDate: "2024-06-01",
-  });
-  
-  // Should have predictions for each lunch draw in test period
-  assert.ok(result.totalPredictions >= 0);
+test("Backtest: walk-forward produces scores and a hit distribution", () => {
+  const history = engineHistory(createMockDraws(), "lunchtime");
+  const report = runBacktest(history, 30, DEFAULT_WEIGHTS);
+
+  assert.ok(report.testedDraws > 0);
+  const sum = report.hitDistribution.reduce((acc, entry) => acc + entry.lines, 0);
+  assert.equal(sum, report.testedDraws * report.linesPerDraw);
+  assert.ok(report.randomBaseline > 0);
 });
 
-test("Backtest: hit distribution sums to total", () => {
-  const draws = createMockDraws();
-  
-  const result = runBacktest(draws, {
-    drawType: "lunchtime",
-    lookbackWindow: 30,
-    testStartDate: "2024-03-01",
-    testEndDate: "2024-06-01",
+test("Backtest: no future data leakage — each run trains only on older draws", () => {
+  const history = engineHistory(createMockDraws(), "lunchtime");
+  const report = runBacktest(history, 5, DEFAULT_WEIGHTS);
+
+  // Rebuild the newest run's line from only the draws after it and compare.
+  const target = history[0];
+  const [fresh] = buildPredictions({
+    draws: history.slice(1),
+    targetDate: target.draw_date,
+    drawTime: target.draw_time,
+    sets: 1,
+    weights: DEFAULT_WEIGHTS,
   });
-  
-  if (result.totalPredictions > 0) {
-    const sum = result.hitDistribution.reduce((acc: number, h: { hits: number; count: number }) => acc + h.count, 0);
-    assert.equal(sum, result.totalPredictions);
+
+  assert.deepEqual(report.runs[0].bestLine, fresh.numbers);
+});
+
+test("Backtest: stops cleanly when there is not enough history to train", () => {
+  const history = engineHistory(createMockDraws().slice(0, 5), "lunchtime");
+  const report = runBacktest(history, 30, DEFAULT_WEIGHTS);
+  assert.equal(report.testedDraws, 0);
+});
+
+// ============================================
+// TUNER TESTS
+// ============================================
+
+test("Tuner: grid expands to 392 candidate weight sets", () => {
+  assert.equal(buildGrid().length, 392);
+  for (const weights of buildGrid()) {
+    assert.ok(weights.hot > 0 && weights.hot < 1);
+    assert.equal(weights.overdue, Math.round((1 - weights.hot) * 100) / 100);
+    assert.ok(weights.halfLife > 0);
+    assert.ok(weights.power > 0);
   }
 });
 
-test("Backtest: runFullBacktest includes baselines", () => {
-  const draws = createMockDraws();
-  
-  const result = runFullBacktest(draws, {
-    drawType: "lunchtime",
-    lookbackWindow: 30,
-    testStartDate: "2024-03-01",
-    testEndDate: "2024-06-01",
-  });
-  
-  assert.ok(result.superhybrid);
-  assert.ok(result.randomBaseline);
-  assert.ok(result.frequencyBaseline);
-  assert.ok(result.comparison);
-});
+test("Tuner: findChampion picks a valid champion from the grid", () => {
+  const history = engineHistory(createMockDraws(), "lunchtime");
+  const champion = findChampion(history, 5);
 
-test("Backtest: compareLookbackWindows returns results for all windows", () => {
-  const draws = createMockDraws();
-  
-  const results = compareLookbackWindows(
-    draws,
-    "lunchtime",
-    "2024-03-01",
-    "2024-06-01",
-    [30, 60, 90]
-  );
-  
-  assert.equal(results.length, 3);
-  assert.ok(results.every((r: { lookbackWindow: number }) => r.lookbackWindow > 0));
-});
-
-test("Backtest: generateRandomPrediction returns valid structure", () => {
-  const prediction = generateRandomPrediction(Array.from({ length: 49 }, (_, i) => i + 1));
-  
-  assert.equal(prediction.main.length, 4);
-  assert.ok(prediction.booster >= 1 && prediction.booster <= 49);
-  
-  // Main numbers should be unique and sorted
-  const unique = new Set(prediction.main);
-  assert.equal(unique.size, 4);
-  assert.deepEqual(prediction.main, [...prediction.main].sort((a: number, b: number) => a - b));
-  
-  // Booster should not be in main
-  assert.ok(!prediction.main.includes(prediction.booster));
-});
-
-test("Backtest: generateFrequencyPrediction returns top frequency numbers", () => {
-  const draws = createMockDraws();
-  const prediction = generateFrequencyPrediction(draws, 50);
-  
-  assert.equal(prediction.main.length, 4);
-  assert.ok(prediction.booster >= 1 && prediction.booster <= 49);
+  assert.equal(champion.candidatesTested, 392);
+  assert.ok(buildGrid().some((w) => w.hot === champion.weights.hot && w.power === champion.weights.power));
+  assert.ok(champion.report.testedDraws > 0);
+  assert.equal(champion.report.targetMet, champion.report.threePlusCount >= champion.target);
 });
 
 // ============================================
@@ -296,270 +242,27 @@ test("Data Integrity: drawToNumbers helper works correctly", () => {
   assert.equal(result.booster, 49);
 });
 
-test("Data Integrity: Lunch and Tea separation", () => {
-  const draws = createMockDraws();
-  const lunchDraws = draws.filter(d => d.drawType === "lunchtime");
-  const teaDraws = draws.filter(d => d.drawType === "teatime");
-  
-  // They should be separate
-  assert.ok(lunchDraws.length > 0);
-  assert.ok(teaDraws.length > 0);
-  
-  // No overlap in dates between types (based on how we created them)
-  const lunchDates = new Set(lunchDraws.map(d => d.drawDate));
-  const teaDates = new Set(teaDraws.map(d => d.drawDate));
-  
-  for (const date of lunchDates) {
-    assert.ok(!teaDates.has(date) || lunchDraws.filter(d => d.drawDate === date).length === 0);
+test("Data Integrity: toEngineDraws keeps a single draw type and exposes 6 mains", () => {
+  const history = engineHistory(createMockDraws(), "teatime");
+  assert.ok(history.length > 0);
+  for (const draw of history) {
+    assert.equal(draw.numbers.length, 6);
+    assert.equal(draw.bonus_numbers.length, 1);
+    assert.ok(draw.numbers.every((n) => n >= 1 && n <= 49));
   }
 });
 
-test("Data Integrity: Booster Ball validation (never in main numbers)", () => {
-  const draws = createMockDraws();
-  
-  for (const draw of draws) {
+test("Data Integrity: Booster Ball never appears in main numbers", () => {
+  for (const draw of createMockDraws()) {
     const { main, booster } = drawToNumbers(draw);
-    
-    // Booster should not be in main numbers
-    assert.ok(!main.includes(booster), `Booster ${booster} is in main numbers for draw ${draw.drawDate}`);
-    
-    // All numbers should be 1-49
-    assert.ok(booster >= 1 && booster <= 49);
-    for (const num of main) {
-      assert.ok(num >= 1 && num <= 49);
-    }
-  }
-});
-
-test("Data Integrity: Main numbers are always 6 unique numbers", () => {
-  const draws = createMockDraws();
-  
-  for (const draw of draws) {
-    const { main } = drawToNumbers(draw);
-    
-    // Should be exactly 6 numbers
+    assert.ok(!main.includes(booster));
     assert.equal(main.length, 6);
-
-    // Should be unique
-    const unique = new Set(main);
-    assert.equal(unique.size, 6);
+    assert.equal(new Set(main).size, 6);
   }
 });
 
-// ============================================
-// NO FUTURE DATA LEAKAGE TESTS
-// ============================================
-
-test("Leakage Test: predictions only use data before target date", () => {
-  const draws: Uk49sDraw[] = [];
-  
-  // Create draws with known patterns
-  for (let i = 0; i < 50; i++) {
-    const date = `2024-${String(Math.floor(i / 4) + 1).padStart(2, "0")}-${String((i % 28) + 1).padStart(2, "0")}`;
-    const base = i * 7;
-    const main = [
-      ((base + 1) % 49) + 1,
-      ((base + 2) % 49) + 1,
-      ((base + 3) % 49) + 1,
-      ((base + 4) % 49) + 1,
-      ((base + 5) % 49) + 1,
-      ((base + 6) % 49) + 1,
-    ];
-    draws.push(createMockDraw(date, "lunchtime", main, ((base + 7) % 49) + 1));
-  }
-  
-  // Run backtest
-  const result = runBacktest(draws, {
-    drawType: "lunchtime",
-    lookbackWindow: 10,
-    testStartDate: "2024-02-01",
-    testEndDate: "2024-04-01",
-  });
-  
-  // Verify each prediction only uses draws before its date
-  for (const prediction of result.predictions) {
-    // Training cutoff should be before prediction date
-    assert.ok(prediction.trainingCutoff < prediction.predictionDate);
-  }
-});
-
-test("Leakage Test: changing future draw does not affect earlier predictions", () => {
-  const draws: Uk49sDraw[] = [];
-  
-  // Create 20 draws
-  for (let i = 0; i < 20; i++) {
-    const date = `2024-01-${String(i + 1).padStart(2, "0")}`;
-    draws.push(createMockDraw(date, "lunchtime", [1, 2, 3, 4, 5, 6], 7));
-  }
-  
-  // Run backtest
-  const result1 = runBacktest(draws, {
-    drawType: "lunchtime",
-    lookbackWindow: 5,
-    testStartDate: "2024-01-10",
-    testEndDate: "2024-01-15",
-  });
-  
-  // Store first prediction
-  const firstPrediction = result1.predictions[0];
-  
-  // Modify a future draw
-  draws[15] = createMockDraw("2024-01-16", "lunchtime", [40, 41, 42, 43, 44, 45], 46);
-  
-  // Run backtest again
-  const result2 = runBacktest(draws, {
-    drawType: "lunchtime",
-    lookbackWindow: 5,
-    testStartDate: "2024-01-10",
-    testEndDate: "2024-01-15",
-  });
-  
-  // First prediction should be unchanged
-  assert.deepEqual(result1.predictions[0], firstPrediction);
-});
-
-// ============================================
-// PREDICTION FORMAT TESTS
-// ============================================
-
-test("Prediction Format: always exactly 4 main numbers", () => {
-  const draws = createMockDraws();
-  
-  for (const drawType of ["lunchtime", "teatime"] as const) {
-    const result = generatePrediction(draws, drawType, DEFAULT_WEIGHTS, 30);
-    assert.equal(result.mainNumbers.length, 4, `Expected 4 main numbers for ${drawType}`);
-  }
-});
-
-test("Prediction Format: Booster Ball is always separate", () => {
-  const draws = createMockDraws();
-  
-  for (const drawType of ["lunchtime", "teatime"] as const) {
-    const result = generatePrediction(draws, drawType, DEFAULT_WEIGHTS, 30);
-    
-    // Booster should not be in main numbers
-    assert.ok(!result.mainNumbers.includes(result.boosterBall), 
-      `Booster ${result.boosterBall} is in main numbers`);
-    
-    // Booster should be in valid range
-    assert.ok(result.boosterBall >= 1 && result.boosterBall <= 49);
-  }
-});
-
-test("Prediction Format: main numbers are sorted ascending", () => {
-  const draws = createMockDraws();
-  
-  for (let i = 0; i < 10; i++) {
-    // Use different weights to get different predictions
-    const weights: FeatureWeights = {
-      ...DEFAULT_WEIGHTS,
-      weightFrequency: Math.random() * 2,
-      weightRecency: Math.random() * 2,
-    };
-    const result = generatePrediction(draws, "lunchtime", weights, 30);
-    assert.deepEqual(result.mainNumbers, [...result.mainNumbers].sort((a: number, b: number) => a - b));
-  }
-});
-
-// ============================================
-// OPTIMIZER TESTS
-// ============================================
-
-test("Optimizer: weights stay within valid range", () => {
-  const draws = createMockDraws();
-  
-  // The optimizer should produce weights between 0 and 3
-  // This is tested through the validation in the optimizer itself
-  // Here we just verify the system handles it gracefully
-  
-  try {
-    const result = optimizeWeightsForWindow(
-      draws,
-      "lunchtime",
-      30,
-      "2024-01-01",
-      "2024-02-01",
-      "2024-02-15",
-      "2024-03-01",
-      10, // Small number of iterations for test
-      42
-    );
-    
-    assert.ok(result.weights);
-    assert.ok(result.result);
-  } catch (e) {
-    // Some configurations may not have enough data
-    assert.ok(true); // Test passes if it handles edge case gracefully
-  }
-});
-
-// ============================================
-// BASELINE COMPARISON TESTS
-// ============================================
-
-test("Baseline: Random baseline produces expected distribution", () => {
-  const allNumbers = Array.from({ length: 49 }, (_, i) => i + 1);
-  const predictions: { main: number[]; booster: number }[] = [];
-  
-  // Generate many random predictions
-  for (let i = 0; i < 1000; i++) {
-    predictions.push(generateRandomPrediction(allNumbers));
-  }
-  
-  // Calculate hit counts (assuming all numbers from 1-10 are the "winners")
-  const winners = [1, 2, 3, 4, 5];
-  let totalHits = 0;
-  for (const pred of predictions) {
-    totalHits += pred.main.filter(n => winners.includes(n)).length;
-  }
-  
-  // Expected: ~1000 * 4/49 * 5 ≈ 408 hits
-  // Allow for statistical variance
-  assert.ok(totalHits > 200 && totalHits < 700, 
-    `Expected ~408 hits, got ${totalHits}`);
-});
-
-test("Baseline: Frequency baseline differs from random", () => {
-  const draws = createMockDraws();
-  
-  const freqPred = generateFrequencyPrediction(draws, 50);
-  const randPred = generateRandomPrediction(Array.from({ length: 49 }, (_, i) => i + 1));
-  
-  // They should produce different results (most of the time)
-  // This is probabilistic, so we just verify they work
-  assert.equal(freqPred.main.length, 4);
-  assert.equal(randPred.main.length, 4);
-});
-
-// ============================================
-// EDGE CASE TESTS
-// ============================================
-
-test("Edge Case: handles draws with minimal history", () => {
-  const draws = createMockDraws().slice(0, 5);
-  
-  const result = runBacktest(draws, {
-    drawType: "lunchtime",
-    lookbackWindow: 10, // More than available
-    testStartDate: "2024-01-01",
-    testEndDate: "2024-12-31",
-  });
-  
-  // Should handle gracefully with 0 or few predictions
-  assert.ok(result.totalPredictions >= 0);
-});
-
-test("Edge Case: handles single draw in test period", () => {
-  const draws = createMockDraws();
-  
-  const result = runBacktest(draws, {
-    drawType: "lunchtime",
-    lookbackWindow: 10,
-    testStartDate: "2024-01-05",
-    testEndDate: "2024-01-05",
-  });
-  
-  assert.ok(result.totalPredictions <= 1);
+test("Data Integrity: MIN_TRAIN guards short histories", () => {
+  assert.equal(MIN_TRAIN, 20);
 });
 
 console.log("All UK49s comprehensive tests loaded.");

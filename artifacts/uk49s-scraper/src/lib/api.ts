@@ -1,6 +1,6 @@
-// Typed client for the existing 49S Predictor API (Express server, proxied
-// under /api). This module only *consumes* the API — it contains no scraping,
-// prediction or database logic.
+// Typed client for the 49S Predictor API (Express server, proxied under /api).
+// This module only *consumes* the API — it contains no scraping, prediction or
+// database logic.
 
 export type DrawType = 'lunchtime' | 'teatime';
 
@@ -113,7 +113,6 @@ export interface Prediction {
   predictedMain: number[];
   predictedBooster: number;
   modelConfigId: number | null;
-  modelVersion: string | null;
   trainingCutoff: string;
   status: string;
   mainHits: number | null;
@@ -123,152 +122,70 @@ export interface Prediction {
   createdAt: string;
 }
 
+/** The engine's four tunable weights. */
+export interface EngineWeights {
+  hot: number;
+  overdue: number;
+  halfLife: number;
+  power: number;
+}
+
 export interface ModelInfo {
-  id: number;
-  drawType: DrawType;
+  /** null when no champion has been locked yet (engine defaults are used). */
+  id: number | null;
+  drawType: DrawType | null;
   version: string;
-  status: string;
-  strategy?: PredictionStrategy;
-  poolSize?: number;
-  weights: Record<string, number>;
-  lookbackWindow: number;
-  constraints: { enforceDiversity: boolean; minNumberSpread: number; maxSameGroup: number };
-  trainingCutoff: string | null;
-  validationMetrics: { fourHitRate: number; avgHits: number; sampleSize: number } | null;
-  createdAt: string;
-  updatedAt: string;
+  weights: EngineWeights;
+  threePlusCount: number | null;
+  avgHitsPerLine: number | null;
+  candidatesTested: number | null;
+  targetMet: boolean;
+  createdAt: string | null;
+  updatedAt: string | null;
 }
 
 export interface BacktestRun {
-  id: number;
+  id?: number;
   /** A valid run completed and resolved at least one draw. */
   valid?: boolean;
   /** Statistics are only counted since the active model was applied. */
   statsSince?: string | null;
   totalPredictions: number;
   testPeriod: { startDate: string; endDate: string };
-  lookbackWindow: number;
-  superhybrid: {
-    hitDistribution: { hits: number; count: number }[];
-    avgMainHits: number;
-    medianMainHits: number;
-    maxMainHits: number;
-    fourHitCount: number;
-    fourHitRate: number;
-    boosterHitRate: number;
-  };
-  baselines: {
-    random: { totalPredictions: number; avgMainHits: number; fourHitRate: number; boosterHitRate: number };
-    frequency: { totalPredictions: number; avgMainHits: number; fourHitRate: number; boosterHitRate: number };
-  };
-  comparison: Record<string, { avgHitsDiff: number; fourHitRateDiff: number }>;
-  rollingMetrics: unknown[];
-  completedAt: string | null;
+  hitDistribution: { hits: number; lines: number; pct: number }[];
+  avgHits: number;
+  bestHits: number;
+  fourHitRate: number;
+  randomBaseline: number;
+  completedAt?: string | null;
 }
 
 export interface BacktestHistoryItem {
   id: number;
-  /** False for zero-draw/failed runs kept only for audit: not counted as completed. */
+  /** False for zero-draw/failed runs kept only for audit. */
   valid?: boolean;
-  lookbackWindow: number;
   testPeriod: { startDate: string; endDate: string };
   totalPredictions: number;
-  avgMainHits: number | null;
+  avgHits: number | null;
+  bestHits: number | null;
   fourHitRate: number | null;
-  boosterHitRate: number | null;
-  baselines: {
-    random: { avgMainHits: number | null; fourHitRate: number | null };
-    frequency: { avgMainHits: number | null; fourHitRate: number | null };
-  };
+  randomBaseline: number | null;
   completedAt: string | null;
-}
-
-export type OptimizerStopReason = 'four-hit-found' | 'max-configurations-reached' | 'search-exhausted';
-
-/** Selectable prediction strategies the optimizer can search. */
-export type PredictionStrategy = 'superhybrid' | 'hybrid' | 'superhybrid3';
-
-export const PREDICTION_STRATEGY_OPTIONS: { value: PredictionStrategy; label: string; hint: string }[] = [
-  {
-    value: 'superhybrid',
-    label: 'SuperHybrid (13 features)',
-    hint: 'Frequency, recency, hot/cold, gap, pairs, triples, balance and more',
-  },
-  {
-    value: 'hybrid',
-    label: 'Super Hybrid (Frequency · Gap · Bonus)',
-    hint: 'Frequency 0.5 + gap 0.3 + booster-influence 0.2 → top-pool → best 4',
-  },
-  {
-    value: 'superhybrid3',
-    label: 'SuperHybrid v3 (Overdue · Momentum · Neighbours)',
-    hint: 'Overdue scoring + momentum + neighbour influence',
-  },
-];
-
-/** One engine's walk-forward result in the automatic engine showdown. */
-export interface EngineEvaluation {
-  strategy: PredictionStrategy;
-  label: string;
-  liveConfig: boolean;
-  lookbackWindow: number;
-  poolSize: number;
-  totalPredictions: number;
-  fourHitCount: number;
-  fourHitRate: number;
-  avgMainHits: number;
-  boosterHitRate: number;
-}
-
-/** Both engines evaluated after a draw; the winner predicts the next draw. */
-export interface ShowdownResult {
-  drawType: DrawType;
-  evaluatedAt: string;
-  latestDrawDate: string;
-  window: { startDate: string; endDate: string; drawCount: number };
-  evaluations: EngineEvaluation[];
-  champion: PredictionStrategy;
-  winner: PredictionStrategy;
-  promoted: boolean;
-  detail: string;
-}
-
-/** A historical validation prediction that matched exactly four numbers. */
-export interface FourHitRecord {
-  validationDrawDate: string;
-  trainingCutoff: string;
-  predictedMain: number[];
-  predictedBooster: number;
-  actualMain: number[];
-  actualBooster: number;
-  mainHits: number;
 }
 
 export interface OptimizerRunItem {
   id: number;
   drawType?: DrawType;
-  strategy?: PredictionStrategy;
   status: string;
-  configsTested: number;
-  configsFailed?: number;
-  totalConfigs?: number | null;
-  maxConfigurations?: number | null;
-  stopOnFourHit?: boolean;
-  stoppedReason?: OptimizerStopReason | null;
+  candidatesTested: number;
+  candidatesTotal: number;
+  threePlusCount: number;
+  targetMet: boolean;
+  avgHitsPerLine: number | null;
   maxHits?: number | null;
-  fourHitFound?: boolean;
-  fourHitCount?: number;
-  fourHitConfigId?: number | null;
-  fourHitDrawDate?: string | null;
-  fourHitPredictedMain?: string | null;
-  fourHitActualMain?: string | null;
-  fourHitHits?: number | null;
-  validationDrawCount?: number | null;
-  autoWindow?: boolean;
-  errorMessage?: string | null;
+  stoppedReason?: string | null;
   validationPeriod: { startDate: string | null; endDate: string | null };
-  testPeriod?: { startDate: string | null; endDate: string | null } | null;
-  bestMetrics: { fourHitRate: number | null; avgHits: number | null };
+  errorMessage?: string | null;
   startedAt?: string;
   completedAt: string | null;
 }
@@ -299,40 +216,19 @@ export type OptimizerJobStatus = 'queued' | 'running' | 'completed' | 'failed' |
 export interface OptimizerJobState {
   runId: number;
   drawType: DrawType;
-  strategy: PredictionStrategy;
   status: OptimizerJobStatus;
   startedAt: string;
   finishedAt: string | null;
   elapsedMs: number;
-  totalConfigs: number;
-  configsTested: number;
-  configsFailed: number;
-  currentIteration: number;
-  phase: string | null;
-  best4HitRate: number | null;
-  bestAvgHits: number | null;
-  bestScore: number | null;
-  currentConfig: {
-    lookbackWindow: number;
-    poolSize: number;
-    weights: Record<string, number>;
-    constraints: { enforceDiversity: boolean; minNumberSpread: number; maxSameGroup: number };
-  } | null;
+  candidatesTested: number;
+  candidatesTotal: number;
+  threePlusCount: number;
+  avgHitsPerLine: number | null;
+  targetMet: boolean;
+  weights: EngineWeights | null;
   errorMessage: string | null;
-  validationStartDate: string | null;
-  validationEndDate: string | null;
-  validationDrawCount: number | null;
-    autoWindow: boolean;
-    hasResult: boolean;
-    maxConfigurations: number | null;
-    stopOnFourHit: boolean;
-    stoppedReason: OptimizerStopReason | null;
-    maxHits: number;
-    fourHitCount: number;
-    fourHitFound: boolean;
-    fourHit: FourHitRecord | null;
-    fourHitConfigId: number | null;
-  }
+  hasResult: boolean;
+}
 
 export interface OptimizerPreflightResponse {
   success: boolean;
@@ -340,8 +236,9 @@ export interface OptimizerPreflightResponse {
   ready: boolean;
   window: OptimizerWindow;
   checks: OptimizerPreflightCheck[];
+  candidates: number;
+  target: number;
   activeJob: OptimizerJobState | null;
-  modelLabel: string;
 }
 
 export interface OptimizerDiagnosticRow {
@@ -359,8 +256,8 @@ export interface OptimizerDiagnosticRow {
 
 export interface OptimizerDiagnosticReport {
   drawType: DrawType;
-  strategy?: PredictionStrategy;
   window: OptimizerWindow;
+  weights: EngineWeights;
   sampleRequested: number;
   validationDrawCount: number;
   predictionsGenerated: number;
@@ -425,28 +322,26 @@ export const api = {
   getLatestPrediction: (drawType: DrawType) =>
     get<{ success: boolean; prediction: Prediction }>(`/api/predictions/latest/${drawType}`),
   getPredictionHistory: (drawType: DrawType, limit = 50) =>
-      get<{ success: boolean; count: number; statsSince?: string | null; predictions: Prediction[] }>(
-        `/api/predictions/history/${drawType}?limit=${limit}`,
-      ),
+    get<{ success: boolean; count: number; statsSince?: string | null; predictions: Prediction[] }>(
+      `/api/predictions/history/${drawType}?limit=${limit}`,
+    ),
   getActiveModel: (drawType: DrawType) =>
-      get<{ success: boolean; model: ModelInfo }>(`/api/predictions/model/${drawType}`),
-    getEngineShowdown: (drawType: DrawType) =>
-      get<{ success: boolean; showdown: ShowdownResult }>(`/api/predictions/showdown/${drawType}`),
+    get<{ success: boolean; model: ModelInfo }>(`/api/predictions/model/${drawType}`),
   getModelHistory: (drawType: DrawType) =>
     get<{ success: boolean; count: number; models: ModelInfo[] }>(
       `/api/predictions/model/${drawType}/history`,
     ),
 
   getBacktestLatest: (drawType: DrawType) =>
-      get<{ success: boolean; statsSince?: string | null; backtest: BacktestRun }>(
-        `/api/backtest/latest/${drawType}`,
-      ),
-    getBacktestHistory: (drawType: DrawType) =>
-      get<{ success: boolean; count: number; statsSince?: string | null; backtests: BacktestHistoryItem[] }>(
-        `/api/backtest/history/${drawType}`,
-      ),
+    get<{ success: boolean; statsSince?: string | null; backtest: BacktestRun }>(
+      `/api/backtest/latest/${drawType}`,
+    ),
+  getBacktestHistory: (drawType: DrawType) =>
+    get<{ success: boolean; count: number; statsSince?: string | null; backtests: BacktestHistoryItem[] }>(
+      `/api/backtest/history/${drawType}`,
+    ),
   getOptimizerHistory: (drawType: DrawType) =>
-    get<{ success: boolean; count: number; optimizationRuns: OptimizerRunItem[] }>(
+    get<{ success: boolean; count: number; target: number; candidates: number; optimizationRuns: OptimizerRunItem[] }>(
       `/api/optimizer/history/${drawType}`,
     ),
 
@@ -463,81 +358,41 @@ export const api = {
   getDataQuality: () => get<{ success: boolean } & Record<string, unknown>>('/api/data/quality'),
   generatePrediction: (body: { drawType: DrawType; predictionDate?: string }) =>
     adminPost<{ success: boolean; prediction: Prediction }>('/api/predictions/generate', body),
-  runBacktest: (body: Record<string, unknown>) =>
-    adminPost<{ success: boolean; backtest: BacktestRun }>('/api/backtest/run', body),
-  runOptimizer: (body: Record<string, unknown>) =>
-      adminPost<{ success: boolean; optimizerRun: unknown; bestConfiguration: unknown; newModelId: number | null }>(
-        '/api/optimizer/run',
-        body,
-      ),
-  
-    // -------------------------------------------------------------------------
-    // Optimizer workflow (automatic validation window, background jobs, checks)
-    // -------------------------------------------------------------------------
-    getOptimizerPreflight: (drawType: DrawType) =>
-      get<OptimizerPreflightResponse>(`/api/optimizer/preflight/${drawType}`),
-    startOptimizerRun: (body: {
-      drawType: DrawType;
-      strategy?: PredictionStrategy;
-      maxConfigurations?: number;
-      stopOnFourHit?: boolean;
-      populationSize?: number;
-      eliteSize?: number;
-      minValidationSamples?: number;
-      randomSeed?: number;
-      applyToModel?: boolean;
-      customWindow?: boolean;
-      validationStartDate?: string;
-      validationEndDate?: string;
-      allowDuplicate?: boolean;
-    }) =>
-      adminPost<{
-        success: boolean;
-        runId: number;
-        window: OptimizerWindow;
-        checks: OptimizerPreflightCheck[];
-        job: OptimizerJobState;
-      }>('/api/optimizer/run', body),
-    getOptimizerStatus: (runId: number) =>
-      get<{ success: boolean; source: string; job: OptimizerJobState }>(`/api/optimizer/status/${runId}`),
-    getActiveOptimizerJob: (drawType: DrawType) =>
-      get<{ success: boolean; drawType: DrawType; job: OptimizerJobState | null }>(
-        `/api/optimizer/active/${drawType}`,
-      ),
-    cancelOptimizerRun: (runId: number) =>
-      adminPost<{ success: boolean; job: OptimizerJobState }>(`/api/optimizer/cancel/${runId}`, {}),
-    applyOptimizerBest: (runId: number) =>
-      adminPost<{
-        success: boolean;
-        runId: number;
-        drawType: DrawType;
-        configId: number;
-        newModelId: number;
-        fourHitFound: boolean;
-        fourHit: {
-          validationDrawDate: string | null;
-          predictedMain: number[] | null;
-          actualMain: number[] | null;
-          hits: number | null;
-        } | null;
-      }>(`/api/optimizer/apply/${runId}`, {}),
-    runOptimizerDiagnostic: (body: {
-          drawType: DrawType;
-          strategy?: PredictionStrategy;
-          sampleSize?: number;
-          customWindow?: boolean;
-          validationStartDate?: string;
-          validationEndDate?: string;
-        }) =>
-      adminPost<{ success: boolean; drawType: DrawType; report: OptimizerDiagnosticReport }>(
-        '/api/optimizer/diagnose',
-        body,
-      ),
-    getOptimizerRunDetails: (runId: number) =>
-      get<{ success: boolean; run: Record<string, unknown>; liveProgress: OptimizerJobState | null }>(
-        `/api/optimizer/run/${runId}`,
-      ),
-  };
+  runBacktest: (body: {
+    drawType: DrawType;
+    testStartDate: string;
+    testEndDate: string;
+    weights?: EngineWeights;
+  }) => adminPost<{ success: boolean; backtest: BacktestRun }>('/api/backtest/run', body),
+
+  // Optimizer workflow (validation window, walk-forward tuning)
+  getOptimizerPreflight: (drawType: DrawType) =>
+    get<OptimizerPreflightResponse>(`/api/optimizer/preflight/${drawType}`),
+  startOptimizerRun: (body: {
+    drawType: DrawType;
+    maxTests?: number;
+    allowDuplicate?: boolean;
+  }) =>
+    adminPost<{
+      success: boolean;
+      runId: number;
+      window: OptimizerWindow;
+      job: OptimizerJobState;
+    }>('/api/optimizer/run', body),
+  getOptimizerStatus: (runId: number) =>
+    get<{ success: boolean; source: string; job: OptimizerJobState }>(`/api/optimizer/status/${runId}`),
+  getActiveOptimizerJob: (drawType: DrawType) =>
+    get<{ success: boolean; drawType: DrawType; job: OptimizerJobState | null }>(
+      `/api/optimizer/active/${drawType}`,
+    ),
+  cancelOptimizerRun: (runId: number) =>
+    adminPost<{ success: boolean; job: OptimizerJobState }>(`/api/optimizer/cancel/${runId}`, {}),
+  runOptimizerDiagnostic: (body: { drawType: DrawType; sampleSize?: number }) =>
+    adminPost<{ success: boolean; drawType: DrawType; report: OptimizerDiagnosticReport }>(
+      '/api/optimizer/diagnose',
+      body,
+    ),
+};
 
 export function parseJson<T>(value: string | null, fallback: T): T {
   if (!value) return fallback;

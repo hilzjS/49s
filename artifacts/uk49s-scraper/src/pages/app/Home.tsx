@@ -9,13 +9,7 @@ import {
   Target,
   TrendingUp,
 } from 'lucide-react';
-import {
-  api,
-  type DrawType,
-  type Prediction,
-  type PredictionStrategy,
-  type ShowdownResult,
-} from '@/lib/api';
+import { api, type DrawType, type Prediction } from '@/lib/api';
 import { useAsync, formatDate, formatDateTime, greeting, type AsyncState } from '@/lib/useAsync';
 import { useAuth } from '@/lib/auth';
 import {
@@ -28,113 +22,11 @@ import {
   PanelHeader,
   Spinner,
   StatCard,
-  percent,
 } from '@/components/ui';
 
 interface PredictionResponse {
   success: boolean;
   prediction: Prediction;
-}
-
-interface ShowdownResponse {
-  success: boolean;
-  showdown: ShowdownResult;
-}
-
-const ENGINE_SHORT: Record<PredictionStrategy, string> = {
-  superhybrid: 'SuperHybrid',
-  hybrid: 'Super Hybrid',
-  superhybrid3: 'SuperHybrid v3',
-};
-
-/**
- * After every recorded draw both engines are run over the same window and the
- * better one is made active, so the next draw uses the winning engine.
- */
-function ShowdownCard({
-  drawType,
-  icon,
-  state,
-}: {
-  drawType: DrawType;
-  icon: React.ReactNode;
-  state: AsyncState<ShowdownResponse>;
-}) {
-  const label = drawType === 'lunchtime' ? 'Lunchtime' : 'Teatime';
-  const showdown = state.data?.showdown;
-
-  if (state.loading) {
-    return (
-      <Card>
-        <Spinner label={`Running ${label} engines…`} />
-      </Card>
-    );
-  }
-
-  if (state.error || !showdown) {
-    return (
-      <Card>
-        <PanelHeader
-          title="Engine showdown"
-          subtitle={`${label} · both engines run after every draw`}
-          right={icon}
-        />
-        <EmptyState
-          icon={<Sparkles size={20} />}
-          title="No evaluation yet"
-          description={
-            state.error ?? 'Both engines are scored as soon as a draw is recorded.'
-          }
-        />
-      </Card>
-    );
-  }
-
-  const winner = showdown.evaluations.find((e) => e.strategy === showdown.winner);
-  const challenger = showdown.evaluations.find((e) => e.strategy !== showdown.winner);
-  const ordered = [winner, challenger].filter(
-    (e): e is NonNullable<typeof e> => Boolean(e),
-  );
-
-  return (
-    <Card>
-      <PanelHeader
-        title="Engine showdown"
-        subtitle={`${label} · winner picked for the next draw`}
-        right={<Badge tone="mint">{ENGINE_SHORT[showdown.winner]} wins</Badge>}
-      />
-      <div className="px-5 pt-2">
-        <p className="text-[11.5px] text-[var(--text-3)]">{showdown.detail}</p>
-      </div>
-      <div className="divide-y divide-[var(--line)] px-5">
-        {ordered.map((engine, index) => (
-          <div key={engine.strategy} className="flex items-center justify-between gap-3 py-3">
-            <div className="min-w-0">
-              <p className="flex items-center gap-2 text-[12.5px] font-medium text-[var(--text)]">
-                {ENGINE_SHORT[engine.strategy]}
-                {index === 0 && (
-                  <span className="text-[10.5px] uppercase tracking-[0.08em] text-[var(--gold)]">
-                    Winner
-                  </span>
-                )}
-              </p>
-              <p className="text-[11.5px] text-[var(--text-3)]">{engine.label}</p>
-            </div>
-            <div className="shrink-0 text-right">
-              <p className="mono text-[12.5px] text-[var(--text)]">{percent(engine.fourHitRate)}</p>
-              <p className="text-[11px] text-[var(--text-3)]">
-                {engine.avgMainHits.toFixed(2)} avg hits
-              </p>
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="border-t border-[var(--line)] px-5 py-3 text-[11px] text-[var(--text-3)]">
-        Both engines scored on {formatDate(showdown.window.startDate)} →{' '}
-        {formatDate(showdown.window.endDate)} · {showdown.window.drawCount} draws · 4-hit rate
-      </div>
-    </Card>
-  );
 }
 
 function SessionPanel({
@@ -206,7 +98,7 @@ function SessionPanel({
         </div>
         <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-[11.5px] text-[var(--text-3)]">
           <span>
-            Model <span className="mono text-[var(--text-2)]">{prediction.modelVersion ?? '—'}</span>
+            Trained to <span className="mono text-[var(--text-2)]">{formatDate(prediction.trainingCutoff)}</span>
           </span>
           <span>
             Generated <span className="text-[var(--text-2)]">{formatDateTime(prediction.createdAt)}</span>
@@ -218,12 +110,10 @@ function SessionPanel({
 }
 
 function ResultRow({
-  drawType,
   label,
   state,
   index,
 }: {
-  drawType: DrawType;
   label: string;
   state: AsyncState<{ success: boolean; draws: { drawDate: string; mainNumbers: number[]; boosterBall: number }[] }>;
   index: number;
@@ -251,10 +141,8 @@ export default function Home() {
   const lunch = useAsync(() => api.getLatestPrediction('lunchtime'), []);
   const tea = useAsync(() => api.getLatestPrediction('teatime'), []);
   const lunchDraws = useAsync(() => api.getLatestDraws('lunchtime', 4), []);
-    const teaDraws = useAsync(() => api.getLatestDraws('teatime', 4), []);
-    const lunchShowdown = useAsync(() => api.getEngineShowdown('lunchtime'), []);
-    const teaShowdown = useAsync(() => api.getEngineShowdown('teatime'), []);
-    const backtest = useAsync(() => api.getBacktestLatest('lunchtime'), []);
+  const teaDraws = useAsync(() => api.getLatestDraws('teatime', 4), []);
+  const backtest = useAsync(() => api.getBacktestLatest('lunchtime'), []);
   const history = useAsync(() => api.getPredictionHistory('lunchtime', 5), []);
 
   const bt = backtest.data?.backtest;
@@ -289,19 +177,6 @@ export default function Home() {
         <SessionPanel drawType="teatime" icon={<Moon size={17} />} state={tea} />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <ShowdownCard
-                  drawType="lunchtime"
-                  icon={<Sun size={16} className="text-[var(--text-3)]" />}
-                  state={lunchShowdown}
-                />
-                <ShowdownCard
-                  drawType="teatime"
-                  icon={<Moon size={16} className="text-[var(--text-3)]" />}
-                  state={teaShowdown}
-                />
-      </div>
-
       <div className="grid gap-4 lg:grid-cols-3">
         <Card className="lg:col-span-1">
           <PanelHeader
@@ -310,8 +185,8 @@ export default function Home() {
             right={<CalendarClock size={16} className="text-[var(--text-3)]" />}
           />
           <div className="divide-y divide-[var(--line)] px-5">
-            <ResultRow drawType="lunchtime" label="Lunchtime" state={lunchDraws} index={0} />
-            <ResultRow drawType="teatime" label="Teatime" state={teaDraws} index={0} />
+            <ResultRow label="Lunchtime" state={lunchDraws} index={0} />
+            <ResultRow label="Teatime" state={teaDraws} index={0} />
           </div>
           <div className="border-t border-[var(--line)] px-5 py-3">
             <Link href="/app/results" className="inline-flex items-center gap-1.5 text-[12.5px] font-medium text-[var(--gold)]">
@@ -327,10 +202,10 @@ export default function Home() {
             right={<CalendarClock size={16} className="text-[var(--text-3)]" />}
           />
           <div className="divide-y divide-[var(--line)] px-5">
-            <ResultRow drawType="lunchtime" label="Lunchtime" state={lunchDraws} index={1} />
-            <ResultRow drawType="teatime" label="Teatime" state={teaDraws} index={1} />
-            <ResultRow drawType="lunchtime" label="Lunchtime" state={lunchDraws} index={2} />
-            <ResultRow drawType="teatime" label="Teatime" state={teaDraws} index={2} />
+            <ResultRow label="Lunchtime" state={lunchDraws} index={1} />
+            <ResultRow label="Teatime" state={teaDraws} index={1} />
+            <ResultRow label="Lunchtime" state={lunchDraws} index={2} />
+            <ResultRow label="Teatime" state={teaDraws} index={2} />
           </div>
         </Card>
       </div>
@@ -338,22 +213,22 @@ export default function Home() {
       <div className="grid gap-4 lg:grid-cols-3">
         <StatCard
           label="Avg main hits"
-          value={bt ? bt.superhybrid.avgMainHits.toFixed(2) : '—'}
+          value={bt ? bt.avgHits.toFixed(2) : '—'}
           hint={bt ? `${bt.totalPredictions} backtested draws` : 'No backtest yet'}
           icon={<TrendingUp size={17} />}
           tone="mint"
         />
         <StatCard
-          label="4-hit rate"
-          value={bt ? percent(bt.superhybrid.fourHitRate) : '—'}
-          hint={bt ? `${bt.superhybrid.fourHitCount} exact matches` : 'No backtest yet'}
+          label="Best line"
+          value={bt ? `${bt.bestHits}` : '—'}
+          hint="Most matches in a single line"
           icon={<Target size={17} />}
           tone="gold"
         />
         <StatCard
-          label="Booster hit rate"
-          value={bt ? percent(bt.superhybrid.boosterHitRate) : '—'}
-          hint="Out-of-sample backtest"
+          label="Random baseline"
+          value={bt ? bt.randomBaseline.toFixed(2) : '—'}
+          hint="Expected matches per line by chance"
           icon={<Sparkles size={17} />}
           tone="sky"
         />
@@ -380,7 +255,7 @@ export default function Home() {
                 <div key={p.id} className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
                   <div>
                     <p className="text-[12.5px] font-medium text-[var(--text)]">{formatDate(p.predictionDate)}</p>
-                    <p className="text-[11px] text-[var(--text-3)]">{p.modelVersion ?? 'Model'}</p>
+                    <p className="text-[11px] text-[var(--text-3)]">Engine line</p>
                   </div>
                   <Balls main={p.predictedMain} booster={p.predictedBooster} size="sm" />
                   <Badge tone={p.mainHits == null ? 'neutral' : p.mainHits >= 2 ? 'mint' : 'neutral'}>

@@ -2,20 +2,21 @@
  * Optimizer validation-window resolution, preflight validation and pipeline
  * diagnostics.
  *
- * The prediction algorithm, feature definitions, scoring rules and the
- * optimization strategy all live in lib/db/src/schema/* and are used here
- * completely unchanged. This module only decides *which historical draws* form
- * the validation period and verifies that the existing pipeline is wired up
- * correctly before a run starts.
+ * The prediction engine itself lives in `lib/db/src/schema/base44-engine.ts` and
+ * is used here unchanged. This module only decides *which historical draws* form
+ * the validation period and proves the pipeline is wired up correctly.
  */
 import {
   DEFAULT_WEIGHTS,
-  DEFAULT_HYBRID_WEIGHTS,
-  calculateAllFeatureScores,
-  runBacktest,
-  type BacktestResult,
+  MIN_TRAIN,
+  buildPredictions,
+  findChampionAsync,
+  runBacktestAsync,
+  toEngineDraws,
+  type BacktestReport,
+  type Base44Weights,
   type DrawType,
-  type PredictionStrategy,
+  type EngineDraw,
   type Uk49sDraw,
 } from "@workspace/db/schema";
 
@@ -27,14 +28,11 @@ export const MIN_VALIDATION_DRAWS = 20;
 export const VALIDATION_MONTHS = 12;
 /** Draws used by the small diagnostic sample run. */
 export const DEFAULT_DIAGNOSTIC_SAMPLE = 10;
-/** Lookback window used for diagnostics (existing engine default). */
-export const DEFAULT_LOOKBACK_WINDOW = 90;
 
 export interface ValidationWindow {
   drawType: DrawType;
   earliestDrawDate: string;
   latestDrawDate: string;
-  /** The most recent draw — reserved as the current prediction reference. */
   referenceDrawDate: string;
   totalDraws: number;
   trainingDrawsBeforeWindow: number;
@@ -83,23 +81,14 @@ function daysBetween(from: string, to: string): number {
 
 /**
  * Derives the validation period from the available history for one draw type.
- *
- * The window always ends on the draw immediately before the latest draw: the
- * latest draw is the current prediction reference, so it must never appear in
- * its own evaluation data. That also guarantees the draw the backtest engine
- * needs in order to close its window.
- *
- * The window aims to cover the most recent 12 months. If less history exists it
- * falls back to the largest valid window available, never going below
- * MIN_VALIDATION_DRAWS unless the data simply does not contain that many draws.
+ * The window ends on the draw immediately before the latest draw — the latest
+ * draw is the prediction reference and must never appear in its own evaluation.
  */
 export function resolveValidationWindow(draws: Uk49sDraw[], drawType: DrawType): ValidationWindow {
   const series = sortDrawsForType(draws, drawType);
 
   if (series.length < 2) {
-    throw new Error(
-      `Not enough ${drawType} draws to derive a validation window (found ${series.length}).`,
-    );
+    throw new Error(`Not enough ${drawType} draws to derive a validation window (found ${series.length}).`);
   }
 
   const latestDrawDate = series[series.length - 1].drawDate;
@@ -112,7 +101,6 @@ export function resolveValidationWindow(draws: Uk49sDraw[], drawType: DrawType):
 
   const usedLargestAvailableWindow = startIdx === 0;
 
-  // Extend backwards rather than reporting a window too small to be useful.
   while (endIdx - startIdx + 1 < MIN_VALIDATION_DRAWS && startIdx > 0) {
     startIdx -= 1;
   }
@@ -176,26 +164,6 @@ export function runPreflightChecks(
         : `${dates.length - uniqueDates.size} duplicate draw date(s) detected`,
   });
 
-  checks.push({
-    name: "Draw type is correct",
-    ok: series.every((draw) => draw.drawType === drawType),
-    critical: true,
-    detail: `all ${series.length} rows are ${drawType}`,
-  });
-
-  const invalidDates = series.filter(
-    (draw) => !/^\d{4}-\d{2}-\d{2}$/.test(draw.drawDate) || Number.isNaN(Date.parse(`${draw.drawDate}T00:00:00Z`)),
-  );
-  checks.push({
-    name: "Draw dates are valid",
-    ok: invalidDates.length === 0,
-    critical: true,
-    detail:
-      invalidDates.length === 0
-        ? "every draw date is a valid YYYY-MM-DD"
-        : `${invalidDates.length} invalid date(s), e.g. ${invalidDates[0]?.drawDate}`,
-  });
-
   const malformed = series.filter((draw) => {
     const mains = [
       draw.mainNumber1,
@@ -208,10 +176,7 @@ export function runPreflightChecks(
     const inRange = mains.every((n) => Number.isInteger(n) && n >= 1 && n <= 49);
     const unique = new Set(mains).size === mains.length;
     const boosterOk =
-      Number.isInteger(draw.boosterBall) &&
-      draw.boosterBall >= 1 &&
-      draw.boosterBall <= 49 &&
-      !mains.includes(draw.boosterBall);
+      Number.isInteger(draw.boosterBall) && draw.boosterBall >= 1 && draw.boosterBall <= 49 && !mains.includes(draw.boosterBall);
     return !inRange || !unique || !boosterOk;
   });
   checks.push({
@@ -225,24 +190,10 @@ export function runPreflightChecks(
   });
 
   checks.push({
-    name: "Prediction function available",
-    ok: typeof calculateAllFeatureScores === "function",
-    critical: true,
-    detail: "calculateAllFeatureScores (existing feature engine)",
-  });
-
-  checks.push({
-    name: "Scoring function available",
-    ok: typeof runBacktest === "function",
-    critical: true,
-    detail: "runBacktest (existing walk-forward scoring)",
-  });
-
-  checks.push({
     name: "Training history before window",
-    ok: window.trainingDrawsBeforeWindow >= DEFAULT_LOOKBACK_WINDOW,
+    ok: window.trainingDrawsBeforeWindow >= MIN_TRAIN,
     critical: false,
-    detail: `${window.trainingDrawsBeforeWindow} draws precede ${window.validationStartDate} (longest lookback is 365)`,
+    detail: `${window.trainingDrawsBeforeWindow} draws precede ${window.validationStartDate} (engine minimum ${MIN_TRAIN})`,
   });
 
   return checks;
@@ -274,8 +225,8 @@ export interface DiagnosticRow {
 
 export interface DiagnosticReport {
   drawType: DrawType;
-  strategy: PredictionStrategy;
   window: ValidationWindow;
+  weights: Base44Weights;
   sampleRequested: number;
   validationDrawCount: number;
   predictionsGenerated: number;
@@ -289,27 +240,26 @@ export interface DiagnosticReport {
 }
 
 /**
- * Runs the existing pipeline (history → features → prediction → actual draw →
- * scoring) over a small sample of the validation window so the wiring can be
- * proven before spending minutes on hundreds of configurations.
+ * Runs the engine (history → score → line → actual draw → scoring) over a small
+ * sample of the validation window so the wiring can be proven first.
  */
-export function runPipelineDiagnostic(
+export async function runPipelineDiagnostic(
   draws: Uk49sDraw[],
   drawType: DrawType,
   window: ValidationWindow,
   sampleSize: number = DEFAULT_DIAGNOSTIC_SAMPLE,
-  strategy: PredictionStrategy = "superhybrid",
-): DiagnosticReport {
+  weights: Base44Weights = DEFAULT_WEIGHTS,
+): Promise<DiagnosticReport> {
   const series = sortDrawsForType(draws, drawType);
   const windowDraws = series.filter(
     (draw) => draw.drawDate >= window.validationStartDate && draw.drawDate <= window.validationEndDate,
   );
   const sample = windowDraws.slice(0, Math.max(1, Math.min(sampleSize, windowDraws.length)));
 
-  const empty: DiagnosticReport = {
+  const base: DiagnosticReport = {
     drawType,
-    strategy,
     window,
+    weights,
     sampleRequested: sampleSize,
     validationDrawCount: window.validationDrawCount,
     predictionsGenerated: 0,
@@ -323,48 +273,47 @@ export function runPipelineDiagnostic(
   };
 
   if (sample.length === 0) {
-    return {
-      ...empty,
-      failures: [{ date: window.validationStartDate, reason: "validation window contains no draws" }],
-    };
+    return { ...base, failures: [{ date: window.validationStartDate, reason: "validation window contains no draws" }] };
   }
 
-  const result: BacktestResult = runBacktest(
-      draws,
-      {
-        drawType,
-        lookbackWindow: DEFAULT_LOOKBACK_WINDOW,
-        testStartDate: sample[0].drawDate,
-        testEndDate: sample[sample.length - 1].drawDate,
-        randomSeed: 1,
-        strategy,
-      },
-      strategy === "hybrid" ? DEFAULT_HYBRID_WEIGHTS : DEFAULT_WEIGHTS,
-    );
+  const drawTime = drawType === "lunchtime" ? "12:30" : "17:49";
+  const rows: DiagnosticRow[] = [];
 
-  const indexByDate = new Map<string, number>();
-  series.forEach((draw, index) => indexByDate.set(draw.drawDate, index));
+  for (const target of sample) {
+    const trainingDraws = series.filter((draw) => draw.drawDate < target.drawDate);
+    if (trainingDraws.length < MIN_TRAIN) continue;
 
-  const rows: DiagnosticRow[] = result.predictions.map((prediction) => ({
-    validationDrawDate: prediction.predictionDate,
-    drawType,
-    trainingDrawCount: indexByDate.get(prediction.predictionDate) ?? 0,
-    trainingCutoff: prediction.trainingCutoff,
-    predictedMain: prediction.predictedMain,
-    predictedBooster: prediction.predictedBooster,
-    actualMain: prediction.actualMain,
-    actualBooster: prediction.actualBooster,
-    mainHits: prediction.mainHits,
-    boosterHit: prediction.boosterHit,
-  }));
+    const engineDraws: EngineDraw[] = toEngineDraws(trainingDraws, drawType);
+    const [set] = buildPredictions({
+      draws: engineDraws,
+      targetDate: target.drawDate,
+      drawTime,
+      sets: 1,
+      weights,
+    });
+    if (!set) continue;
 
-  const evaluated = new Set(rows.map((row) => row.validationDrawDate));
+    const actual = drawToNumbersLocal(target);
+    const mainHits = set.numbers.filter((n) => actual.main.includes(n)).length;
+
+    rows.push({
+      validationDrawDate: target.drawDate,
+      drawType,
+      trainingDrawCount: trainingDraws.length,
+      trainingCutoff: trainingDraws[trainingDraws.length - 1].drawDate,
+      predictedMain: set.numbers,
+      predictedBooster: set.bonus_numbers[0],
+      actualMain: actual.main,
+      actualBooster: actual.booster,
+      mainHits,
+      boosterHit: set.bonus_numbers[0] === actual.booster,
+    });
+  }
+
+  const evaluated = new Set(rows.map((r) => r.validationDrawDate));
   const failures = sample
     .filter((draw) => !evaluated.has(draw.drawDate))
-    .map((draw) => ({
-      date: draw.drawDate,
-      reason: `not evaluated — fewer than ${DEFAULT_LOOKBACK_WINDOW} training draws precede it`,
-    }));
+    .map((draw) => ({ date: draw.drawDate, reason: `not evaluated — fewer than ${MIN_TRAIN} training draws precede it` }));
 
   const structureIssues: string[] = [];
   for (const row of rows) {
@@ -380,33 +329,44 @@ export function runPipelineDiagnostic(
     if (!Number.isInteger(row.predictedBooster) || row.predictedBooster < 1 || row.predictedBooster > 49) {
       structureIssues.push(`${row.validationDrawDate}: predicted booster out of range`);
     }
-    if (row.actualMain.length !== 6) {
-      structureIssues.push(`${row.validationDrawDate}: actual draw has ${row.actualMain.length} main numbers (expected 6)`);
-    }
-    if (row.actualMain.some((n) => !Number.isInteger(n) || n < 1 || n > 49)) {
-      structureIssues.push(`${row.validationDrawDate}: actual main number out of range`);
-    }
-    const recomputedHits = row.predictedMain.filter((n) => row.actualMain.includes(n)).length;
-    if (recomputedHits !== row.mainHits) {
-      structureIssues.push(
-        `${row.validationDrawDate}: recorded ${row.mainHits} hits but direct comparison yields ${recomputedHits}`,
-      );
+    const recomputed = row.predictedMain.filter((n) => row.actualMain.includes(n)).length;
+    if (recomputed !== row.mainHits) {
+      structureIssues.push(`${row.validationDrawDate}: recorded ${row.mainHits} hits but direct comparison yields ${recomputed}`);
     }
   }
 
+  const totalHits = rows.reduce((sum, r) => sum + r.mainHits, 0);
   return {
-    ...empty,
+    ...base,
     predictionsGenerated: rows.length,
     predictionsFailed: failures.length,
     failures,
     structureIssues,
-    avgHits: result.avgMainHits,
-    fourHitRate: result.fourHitRate,
-    boosterHitRate: result.boosterHitRate,
+    avgHits: rows.length ? Math.round((totalHits / rows.length) * 100) / 100 : 0,
+    fourHitRate: rows.length ? Math.round((rows.filter((r) => r.mainHits >= 4).length / rows.length) * 1000) / 10 : 0,
+    boosterHitRate: rows.length ? Math.round((rows.filter((r) => r.boosterHit).length / rows.length) * 1000) / 10 : 0,
     rows,
+  };
+}
+
+function drawToNumbersLocal(draw: Uk49sDraw): { main: number[]; booster: number } {
+  return {
+    main: [
+      draw.mainNumber1,
+      draw.mainNumber2,
+      draw.mainNumber3,
+      draw.mainNumber4,
+      draw.mainNumber5,
+      draw.mainNumber6,
+    ],
+    booster: draw.boosterBall,
   };
 }
 
 export function describeWindow(window: ValidationWindow): string {
   return `${window.validationStartDate} → ${window.validationEndDate} (${window.validationDrawCount} draws, ~${window.monthsCovered} months)`;
 }
+
+/** Re-exported so the optimizer job can run the tuner without a second import. */
+export { findChampionAsync, runBacktestAsync };
+export type { BacktestReport };

@@ -287,26 +287,22 @@ export default function Analytics() {
                   <>
                     <div className="grid grid-cols-3 gap-4">
                       <div>
-                        <p className="eyebrow">Model</p>
-                        <p className="stat-value-sm mt-1">{bt.superhybrid.avgMainHits.toFixed(2)}</p>
+                        <p className="eyebrow">Engine</p>
+                        <p className="stat-value-sm mt-1">{bt.avgHits.toFixed(3)}</p>
                       </div>
                       <div>
                         <p className="eyebrow">Random</p>
-                        <p className="stat-value-sm mt-1 text-[var(--text-2)]">
-                          {bt.baselines.random.avgMainHits.toFixed(2)}
-                        </p>
+                        <p className="stat-value-sm mt-1 text-[var(--text-2)]">{bt.randomBaseline.toFixed(3)}</p>
                       </div>
                       <div>
-                        <p className="eyebrow">Frequency</p>
-                        <p className="stat-value-sm mt-1 text-[var(--text-2)]">
-                          {bt.baselines.frequency.avgMainHits.toFixed(2)}
-                        </p>
+                        <p className="eyebrow">Best line</p>
+                        <p className="stat-value-sm mt-1 text-[var(--text-2)]">{bt.bestHits}</p>
                       </div>
                     </div>
                     <div className="card-2 flex items-center justify-between p-3 text-[12.5px]">
-                      <span className="text-[var(--text-2)]">4-hit rate vs random</span>
-                      <Badge tone={bt.superhybrid.fourHitRate >= bt.baselines.random.fourHitRate ? 'mint' : 'neutral'}>
-                        {percent(bt.superhybrid.fourHitRate)} vs {percent(bt.baselines.random.fourHitRate)}
+                      <span className="text-[var(--text-2)]">4-hit rate</span>
+                      <Badge tone={bt.avgHits >= bt.randomBaseline ? 'mint' : 'neutral'}>
+                        {percent(bt.fourHitRate)} · {bt.totalPredictions} draws
                       </Badge>
                     </div>
                   </>

@@ -15,12 +15,9 @@ async function buildAll() {
   await rm(distDir, { recursive: true, force: true });
 
   await esbuild({
-      // Two entries: the API server and the optimizer worker thread (spawned at
-      // runtime as ./optimizer-worker.mjs next to the server bundle).
-      entryPoints: [
-        path.resolve(artifactDir, "src/index.ts"),
-        path.resolve(artifactDir, "src/optimizer-worker.ts"),
-      ],
+    // Single entry: the API server. (The old optimizer worker thread is gone —
+    // the walk-forward tuner now runs in-process and yields to the event loop.)
+    entryPoints: [path.resolve(artifactDir, "src/index.ts")],
       platform: "node",
       bundle: true,
       format: "esm",

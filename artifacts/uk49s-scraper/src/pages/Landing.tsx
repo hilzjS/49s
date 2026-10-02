@@ -24,9 +24,9 @@ import { useAuth } from '@/lib/auth';
 
 const steps = [
   { icon: Database, title: 'Historical UK49s data', text: 'Every validated Lunchtime and Teatime draw, collected and de-duplicated.' },
-  { icon: BarChart3, title: 'Statistical analysis', text: 'Frequency, recency, gap, pairs and balance features are computed over rolling windows.' },
-  { icon: LineChart, title: 'Model processing', text: 'A configurable SuperHybrid model weights each feature and ranks every number.' },
-  { icon: Target, title: 'Prediction generation', text: 'Four main numbers plus a booster, generated per session with diversity constraints.' },
+  { icon: BarChart3, title: 'Statistical analysis', text: 'Frequency and recency-gap scoring is computed over a half-life weighted window.' },
+  { icon: LineChart, title: 'Model processing', text: 'A hot/overdue blend, tuned by a walk-forward optimizer, ranks every number.' },
+  { icon: Target, title: 'Prediction generation', text: 'Four main numbers plus a booster, generated per session with a balance filter.' },
   { icon: TrendingUp, title: 'Performance tracking', text: 'Predictions are matched to results and scored — including when the model is at chance.' },
 ];
 

@@ -23,6 +23,12 @@
 
 - Draws have 6 main numbers + 1 booster (real UK49s format). Predictions are
   exactly 4 main + 1 booster. Booster never in main numbers.
+- One prediction engine only: `base44-engine.ts` (weights `hot`, `overdue`,
+  `halfLife`, `power`). The SuperHybrid/Hybrid/v3 engines and the engine
+  showdown are removed. The optimizer is the 392-candidate walk-forward tuner;
+  its champion is locked as the active `uk49s_model_configs` row per draw type
+  (weights mapped onto `weight_frequency`/`weight_recency`/`weight_hot_cold`/
+  `weight_gap_analysis`, tuner stats in `description` JSON).
 - Lunchtime and Teatime are fully separate datasets/models.
 - Walk-forward backtests must never use data from the target date or later.
 - `generateAndStorePrediction` filters training draws to `drawDate < predictionDate`.
@@ -32,10 +38,9 @@
 
 ## Key files
 
+- `lib/db/src/schema/base44-engine.ts` — the single prediction engine
+  (frequency + recency-gap scoring, weighted sampling, walk-forward tuner)
 - `lib/db/src/schema/uk49s.ts` — all 7 tables
-- `lib/db/src/schema/feature-engine.ts` — SuperHybrid components
-- `lib/db/src/schema/backtest-engine.ts` — walk-forward validation + baselines
-- `lib/db/src/schema/optimizer-engine.ts` — Random Search + Hill Climbing
 - `artifacts/api-server/src/lib/uk49s-scraper.ts` — preserved source scraper
 - `artifacts/api-server/src/routes/{data,predictions,backtest,optimizer}.ts`
 - `artifacts/uk49s-scraper/src/pages/dashboard/*` — dashboard pages

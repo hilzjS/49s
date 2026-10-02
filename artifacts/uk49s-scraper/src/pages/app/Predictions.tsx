@@ -159,7 +159,9 @@ export default function Predictions() {
           <div className="grid gap-4 px-6 py-5 sm:grid-cols-3">
             <div>
               <p className="eyebrow">Model used</p>
-              <p className="mono mt-1.5 text-[13px] text-[var(--text)]">{prediction.modelVersion ?? '—'}</p>
+              <p className="mono mt-1.5 text-[13px] text-[var(--text)]">
+                {activeModel && activeModel.id !== null ? activeModel.version : 'engine defaults'}
+              </p>
             </div>
             <div>
               <p className="eyebrow">Generated</p>
@@ -219,15 +221,15 @@ export default function Predictions() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <p className="eyebrow">Avg hits</p>
-                  <p className="stat-value-sm mt-1">{bt.superhybrid.avgMainHits.toFixed(2)}</p>
+                  <p className="stat-value-sm mt-1">{bt.avgHits.toFixed(3)}</p>
                 </div>
                 <div>
                   <p className="eyebrow">4-hit rate</p>
-                  <p className="stat-value-sm mt-1">{percent(bt.superhybrid.fourHitRate)}</p>
+                  <p className="stat-value-sm mt-1">{percent(bt.fourHitRate)}</p>
                 </div>
                 <div>
-                  <p className="eyebrow">Booster rate</p>
-                  <p className="stat-value-sm mt-1">{percent(bt.superhybrid.boosterHitRate)}</p>
+                  <p className="eyebrow">Best line</p>
+                  <p className="stat-value-sm mt-1">{bt.bestHits}</p>
                 </div>
                 <div>
                   <p className="eyebrow">Draws</p>
@@ -236,16 +238,12 @@ export default function Predictions() {
               </div>
               <div className="card-2 p-3 text-[12px]">
                 <div className="flex justify-between text-[var(--text-2)]">
-                  <span>Model avg hits</span>
-                  <span className="mono text-[var(--text)]">{bt.superhybrid.avgMainHits.toFixed(2)}</span>
+                  <span>Engine avg hits</span>
+                  <span className="mono text-[var(--text)]">{bt.avgHits.toFixed(3)}</span>
                 </div>
                 <div className="mt-1.5 flex justify-between text-[var(--text-3)]">
                   <span>Random baseline</span>
-                  <span className="mono">{bt.baselines.random.avgMainHits.toFixed(2)}</span>
-                </div>
-                <div className="mt-1.5 flex justify-between text-[var(--text-3)]">
-                  <span>Frequency baseline</span>
-                  <span className="mono">{bt.baselines.frequency.avgMainHits.toFixed(2)}</span>
+                  <span className="mono">{bt.randomBaseline.toFixed(3)}</span>
                 </div>
               </div>
             </div>
@@ -253,19 +251,30 @@ export default function Predictions() {
         </Card>
 
         <Card>
-          <PanelHeader title="Model" subtitle={activeModel ? `Version ${activeModel.version}` : 'Active model'} />
+          <PanelHeader
+            title="Model"
+            subtitle={activeModel && activeModel.id !== null ? `Version ${activeModel.version}` : 'Engine defaults'}
+          />
           {model.loading ? (
             <Spinner />
-          ) : !activeModel ? (
-            <EmptyState title="No active model" description="A model is trained from validated history." />
+          ) : !activeModel || activeModel.id === null ? (
+            <EmptyState
+              title="No tuned champion yet"
+              description="The engine uses its default weights until the optimizer locks a champion."
+            />
           ) : (
             <div className="space-y-4 px-5 py-5">
               <div className="flex flex-wrap gap-2">
-                <Badge tone="mint">{activeModel.status}</Badge>
-                <Badge tone="sky">{activeModel.lookbackWindow} draw lookback</Badge>
+                <Badge tone="mint">base44</Badge>
+                <Badge tone={activeModel.targetMet ? 'mint' : 'neutral'}>
+                  {activeModel.targetMet ? 'target met' : 'below target'}
+                </Badge>
+                {activeModel.candidatesTested != null ? (
+                  <Badge tone="sky">{activeModel.candidatesTested} candidates</Badge>
+                ) : null}
               </div>
               <div>
-                <p className="eyebrow">Feature weights</p>
+                <p className="eyebrow">Engine weights</p>
                 <div className="mt-3 space-y-2">
                   {topWeights.map(([name, value]) => (
                     <div key={name} className="flex items-center gap-3">

@@ -1,7 +1,21 @@
 /**
  * UK49s Prediction Service
- * 
- * Handles prediction generation, storage, and result matching.
+ *
+ * Generates, stores and matches predictions using the single app engine
+ * (`base44-engine.ts`): a frequency + recency-gap scorer with a tuned
+ * hot/overdue/half-life/power blend that produces a 4-number line + 1 booster.
+ *
+ * The tuned "champion" weights are stored on the active model row for each draw
+ * type. Because the engine has only four weights, they are carried on the
+ * existing `uk49s_model_configs` columns as follows (no schema change needed):
+ *
+ *   hot      → weight_frequency
+ *   overdue  → weight_recency
+ *   halfLife → weight_hot_cold
+ *   power    → weight_gap_analysis
+ *
+ * The tuner statistics (3+ count, average hits, candidates tested, target met)
+ * are kept as a small JSON blob in `description`.
  */
 
 import { db } from "@workspace/db";
@@ -9,47 +23,33 @@ import {
   uk49sDraws,
   uk49sPredictions,
   uk49sModelConfigs,
-  insertUk49sPredictionSchema,
-  insertUk49sModelConfigSchema,
   drawToNumbers,
-  type DrawType,
-  type Uk49sDraw,
-  type InsertUk49sPrediction,
-} from "@workspace/db/schema";
-import {
-  generatePrediction,
-  predictionToJson,
-  generateHybridPrediction,
-  hybridPredictionToJson,
-  generateSuperHybrid3Prediction,
-  isPredictionStrategy,
   DEFAULT_WEIGHTS,
-  DEFAULT_HYBRID_POOL_SIZE,
-  V3_CANDIDATE_POOL_SIZE,
-  type FeatureWeights,
-  type DiversityConstraints,
-  type PredictionResult,
-  type PredictionStrategy,
+  MIN_TRAIN,
+  buildPredictions,
+  toEngineDraws,
+  type Base44Weights,
+  type DrawType,
+  type BacktestReport,
 } from "@workspace/db/schema";
 import { eq, and, desc, asc, gte } from "drizzle-orm";
 import { logger } from "./logger";
 
 export interface ModelInfo {
-  id: number;
+  id: number | null;
   drawType: DrawType;
   version: string;
-  status: string;
-  strategy: PredictionStrategy;
-  poolSize: number;
-  weights: FeatureWeights;
-  lookbackWindow: number;
-  constraints: DiversityConstraints;
-  trainingCutoff: string | null;
-  validation4HitRate: number | null;
-  validationAvgHits: number | null;
-  validationSampleSize: number | null;
-  createdAt: Date;
-  updatedAt: Date;
+  weights: Base44Weights;
+  /** Number of validation draws that matched 3+ numbers. */
+  threePlusCount: number | null;
+  /** Average main-number matches per line during tuning. */
+  avgHitsPerLine: number | null;
+  /** Candidate weight sets evaluated by the tuner. */
+  candidatesTested: number | null;
+  /** True once the champion reached the 4-draw target. */
+  targetMet: boolean;
+  createdAt: Date | null;
+  updatedAt: Date | null;
 }
 
 export interface PredictionInfo {
@@ -59,7 +59,6 @@ export interface PredictionInfo {
   predictedMain: number[];
   predictedBooster: number;
   modelConfigId: number | null;
-  modelVersion: string | null;
   trainingCutoff: string;
   status: string;
   mainHits: number | null;
@@ -67,6 +66,42 @@ export interface PredictionInfo {
   actualMain: number[] | null;
   actualBooster: number | null;
   createdAt: Date;
+}
+
+interface ChampionStats {
+  threePlusCount: number | null;
+  avgHitsPerLine: number | null;
+  candidatesTested: number | null;
+  targetMet: boolean;
+}
+
+function weightsFromRow(row: {
+  weightFrequency: number;
+  weightRecency: number;
+  weightHotCold: number;
+  weightGapAnalysis: number;
+}): Base44Weights {
+  return {
+    hot: row.weightFrequency,
+    overdue: row.weightRecency,
+    halfLife: row.weightHotCold,
+    power: row.weightGapAnalysis,
+  };
+}
+
+function parseStats(description: string | null): ChampionStats {
+  if (!description) return { threePlusCount: null, avgHitsPerLine: null, candidatesTested: null, targetMet: false };
+  try {
+    const parsed = JSON.parse(description) as Partial<ChampionStats>;
+    return {
+      threePlusCount: parsed.threePlusCount ?? null,
+      avgHitsPerLine: parsed.avgHitsPerLine ?? null,
+      candidatesTested: parsed.candidatesTested ?? null,
+      targetMet: parsed.targetMet === true,
+    };
+  } catch {
+    return { threePlusCount: null, avgHitsPerLine: null, candidatesTested: null, targetMet: false };
+  }
 }
 
 // Add whole days to a YYYY-MM-DD date without any timezone shift.
@@ -78,12 +113,9 @@ function addDaysIso(iso: string, days: number): string {
 }
 
 /**
- * The date of the next draw that has NOT yet been recorded for this draw type:
- * the day immediately after the latest stored draw. Derived from the stored
- * history rather than the wall clock so a prediction can never skip an undrawn
- * (or not-yet-scraped) draw.
- *
- * Returns null when no draws of this type exist yet.
+ * The date of the next draw that has NOT yet been recorded: the day immediately
+ * after the latest stored draw. Derived from stored history so a prediction can
+ * never skip an undrawn (or not-yet-scraped) draw.
  */
 export async function getNextPredictionDate(drawType: DrawType): Promise<string | null> {
   const rows = await db
@@ -97,328 +129,257 @@ export async function getNextPredictionDate(drawType: DrawType): Promise<string 
   return addDaysIso(rows[0].drawDate, 1);
 }
 
-// Get or create default model config
-export async function getOrCreateDefaultModel(drawType: DrawType): Promise<number> {
-  const existing = await db
+/**
+ * The tuned champion weights for a draw type, or the engine defaults when no
+ * model has been locked yet.
+ */
+export async function getChampionWeights(drawType: DrawType): Promise<Base44Weights> {
+  const row = await db
     .select()
     .from(uk49sModelConfigs)
-    .where(and(
-      eq(uk49sModelConfigs.drawType, drawType),
-      eq(uk49sModelConfigs.status, "active")
-    ))
+    .where(and(eq(uk49sModelConfigs.drawType, drawType), eq(uk49sModelConfigs.status, "active")))
+    .orderBy(desc(uk49sModelConfigs.createdAt))
     .limit(1);
-  
-  if (existing.length > 0) {
-    return existing[0].id;
-  }
-  
-  // Create default model
-  const version = `v1.0.0-${Date.now()}`;
-  const [model] = await db.insert(uk49sModelConfigs).values({
-    drawType,
-    version,
-    status: "active",
-    strategy: "superhybrid",
-    poolSize: DEFAULT_HYBRID_POOL_SIZE,
-    weightFrequency: DEFAULT_WEIGHTS.weightFrequency,
-    weightRecency: DEFAULT_WEIGHTS.weightRecency,
-    weightHotCold: DEFAULT_WEIGHTS.weightHotCold,
-    weightGapAnalysis: DEFAULT_WEIGHTS.weightGapAnalysis,
-    weightPairs: DEFAULT_WEIGHTS.weightPairs,
-    weightTriples: DEFAULT_WEIGHTS.weightTriples,
-    weightConsecutive: DEFAULT_WEIGHTS.weightConsecutive,
-    weightOddEven: DEFAULT_WEIGHTS.weightOddEven,
-    weightLowHigh: DEFAULT_WEIGHTS.weightLowHigh,
-    weightSumRange: DEFAULT_WEIGHTS.weightSumRange,
-    weightPositional: DEFAULT_WEIGHTS.weightPositional,
-    weightRepeat: DEFAULT_WEIGHTS.weightRepeat,
-    weightFirst3Minus2: DEFAULT_WEIGHTS.weightFirst3Minus2,
-    weightBonusInfluence: DEFAULT_WEIGHTS.weightBonusInfluence,
-    weightMomentum: DEFAULT_WEIGHTS.weightMomentum,
-    weightNeighbour: DEFAULT_WEIGHTS.weightNeighbour,
-    lookbackWindow: 90,
-    enforceDiversity: true,
-    minNumberSpread: 10,
-    maxSameGroup: 2,
-    description: "Default SuperHybrid model",
-  }).returning();
-  
-  return model.id;
+
+  return row.length > 0 ? weightsFromRow(row[0]) : DEFAULT_WEIGHTS;
 }
 
-// Get active model info
+/** Active model info for a draw type (null when nothing has been locked yet). */
 export async function getActiveModel(drawType: DrawType): Promise<ModelInfo | null> {
-  const model = await db
+  const row = await db
     .select()
     .from(uk49sModelConfigs)
-    .where(and(
-      eq(uk49sModelConfigs.drawType, drawType),
-      eq(uk49sModelConfigs.status, "active")
-    ))
+    .where(and(eq(uk49sModelConfigs.drawType, drawType), eq(uk49sModelConfigs.status, "active")))
+    .orderBy(desc(uk49sModelConfigs.createdAt))
     .limit(1);
-  
-  if (model.length === 0) return null;
-  
-  const m = model[0];
+
+  if (row.length === 0) return null;
+  const m = row[0];
+  const stats = parseStats(m.description);
   return {
     id: m.id,
     drawType: m.drawType,
     version: m.version,
-    status: m.status,
-    strategy: isPredictionStrategy(m.strategy) ? m.strategy : "superhybrid",
-    poolSize: m.poolSize,
-    weights: {
-      weightFrequency: m.weightFrequency,
-      weightRecency: m.weightRecency,
-      weightHotCold: m.weightHotCold,
-      weightGapAnalysis: m.weightGapAnalysis,
-      weightPairs: m.weightPairs,
-      weightTriples: m.weightTriples,
-      weightConsecutive: m.weightConsecutive,
-      weightOddEven: m.weightOddEven,
-      weightLowHigh: m.weightLowHigh,
-      weightSumRange: m.weightSumRange,
-      weightPositional: m.weightPositional,
-      weightRepeat: m.weightRepeat,
-      weightFirst3Minus2: m.weightFirst3Minus2,
-      weightBonusInfluence: m.weightBonusInfluence,
-      weightMomentum: m.weightMomentum,
-      weightNeighbour: m.weightNeighbour,
-    },
-    lookbackWindow: m.lookbackWindow,
-    constraints: {
-      enforceDiversity: m.enforceDiversity,
-      minNumberSpread: m.minNumberSpread,
-      maxSameGroup: m.maxSameGroup,
-    },
-    trainingCutoff: m.trainingCutoff,
-    validation4HitRate: m.validation4HitRate,
-    validationAvgHits: m.validationAvgHits,
-    validationSampleSize: m.validationSampleSize,
+    weights: weightsFromRow(m),
+    threePlusCount: stats.threePlusCount,
+    avgHitsPerLine: stats.avgHitsPerLine,
+    candidatesTested: stats.candidatesTested,
+    targetMet: stats.targetMet,
     createdAt: m.createdAt,
     updatedAt: m.updatedAt,
   };
 }
 
-// Generate and store prediction
+/**
+ * Locks a freshly tuned champion as the active model for a draw type, archiving
+ * any previous one — the Base44 "one locked weight set per game" behaviour.
+ */
+export async function lockChampion(
+  drawType: DrawType,
+  weights: Base44Weights,
+  report: BacktestReport,
+  candidatesTested: number,
+): Promise<number> {
+  await db
+    .update(uk49sModelConfigs)
+    .set({ status: "archived", updatedAt: new Date() })
+    .where(and(eq(uk49sModelConfigs.drawType, drawType), eq(uk49sModelConfigs.status, "active")));
+
+  const [model] = await db
+    .insert(uk49sModelConfigs)
+    .values({
+      drawType,
+      version: `base44-${Date.now()}`,
+      status: "active",
+      strategy: "base44",
+      poolSize: 4,
+      weightFrequency: weights.hot,
+      weightRecency: weights.overdue,
+      weightHotCold: weights.halfLife,
+      weightGapAnalysis: weights.power,
+      // The four weights above carry the engine parameters; the remaining legacy
+      // weight columns are unused by the engine.
+      weightPairs: 0,
+      weightTriples: 0,
+      weightConsecutive: 0,
+      weightOddEven: 0,
+      weightLowHigh: 0,
+      weightSumRange: 0,
+      weightPositional: 0,
+      weightRepeat: 0,
+      weightFirst3Minus2: 0,
+      weightBonusInfluence: 0,
+      weightMomentum: 0,
+      weightNeighbour: 0,
+      lookbackWindow: report.historyPerRun,
+      enforceDiversity: false,
+      minNumberSpread: 0,
+      maxSameGroup: 0,
+      validation4HitRate: report.threePlusRate,
+      validationAvgHits: report.avgHitsPerLine,
+      validationSampleSize: report.testedDraws,
+      description: JSON.stringify({
+        threePlusCount: report.threePlusCount,
+        avgHitsPerLine: report.avgHitsPerLine,
+        candidatesTested,
+        targetMet: report.targetMet === true,
+      }),
+    })
+    .returning();
+
+  logger.info(
+    { drawType, modelId: model.id, weights, threePlusCount: report.threePlusCount, candidatesTested },
+    "Locked tuned champion weights as the active model",
+  );
+  return model.id;
+}
+
+/** All model versions for a draw type, newest first. */
+export async function getModelHistory(drawType: DrawType): Promise<ModelInfo[]> {
+  const rows = await db
+    .select()
+    .from(uk49sModelConfigs)
+    .where(eq(uk49sModelConfigs.drawType, drawType))
+    .orderBy(desc(uk49sModelConfigs.createdAt));
+
+  return rows.map((m) => {
+    const stats = parseStats(m.description);
+    return {
+      id: m.id,
+      drawType: m.drawType,
+      version: m.version,
+      weights: weightsFromRow(m),
+      threePlusCount: stats.threePlusCount,
+      avgHitsPerLine: stats.avgHitsPerLine,
+      candidatesTested: stats.candidatesTested,
+      targetMet: stats.targetMet,
+      createdAt: m.createdAt,
+      updatedAt: m.updatedAt,
+    };
+  });
+}
+
+/** Generates and stores a prediction for a draw type and target date. */
 export async function generateAndStorePrediction(
   drawType: DrawType,
-  predictionDate: string
+  predictionDate: string,
 ): Promise<{ success: boolean; prediction?: PredictionInfo | null; error?: string }> {
   try {
-    // Check if prediction already exists
     const existing = await db
       .select()
       .from(uk49sPredictions)
-      .where(and(
-        eq(uk49sPredictions.predictionDate, predictionDate),
-        eq(uk49sPredictions.drawType, drawType)
-      ))
+      .where(
+        and(eq(uk49sPredictions.predictionDate, predictionDate), eq(uk49sPredictions.drawType, drawType)),
+      )
       .limit(1);
-    
+
     if (existing.length > 0) {
       return { success: false, error: "Prediction already exists for this date" };
     }
-    
-    // Get active model
-    const modelId = await getOrCreateDefaultModel(drawType);
-    const model = await db.select().from(uk49sModelConfigs).where(eq(uk49sModelConfigs.id, modelId)).limit(1);
-    
-    if (model.length === 0) {
-      return { success: false, error: "No model configuration found" };
-    }
-    
-    const m = model[0];
-    const weights: FeatureWeights = {
-      weightFrequency: m.weightFrequency,
-      weightRecency: m.weightRecency,
-      weightHotCold: m.weightHotCold,
-      weightGapAnalysis: m.weightGapAnalysis,
-      weightPairs: m.weightPairs,
-      weightTriples: m.weightTriples,
-      weightConsecutive: m.weightConsecutive,
-      weightOddEven: m.weightOddEven,
-      weightLowHigh: m.weightLowHigh,
-      weightSumRange: m.weightSumRange,
-      weightPositional: m.weightPositional,
-      weightRepeat: m.weightRepeat,
-      weightFirst3Minus2: m.weightFirst3Minus2,
-      weightBonusInfluence: m.weightBonusInfluence,
-      weightMomentum: m.weightMomentum,
-      weightNeighbour: m.weightNeighbour,
-    };
-    const strategy: PredictionStrategy = isPredictionStrategy(m.strategy) ? m.strategy : "superhybrid";
-    const constraints: DiversityConstraints = {
-      enforceDiversity: m.enforceDiversity,
-      minNumberSpread: m.minNumberSpread,
-      maxSameGroup: m.maxSameGroup,
-    };
-    
-    // Get all historical draws for this type (sorted chronologically).
-    // CRITICAL: only draws strictly before the prediction date may be used,
-    // otherwise the model would be trained on the very draw it predicts.
+
     const allDraws = await db
       .select()
       .from(uk49sDraws)
       .where(eq(uk49sDraws.drawType, drawType))
-      .orderBy(uk49sDraws.drawDate);
+      .orderBy(asc(uk49sDraws.drawDate));
 
     const latestRecorded = allDraws.length > 0 ? allDraws[allDraws.length - 1].drawDate : null;
-    
-        if (!latestRecorded) {
-          return { success: false, error: `No ${drawType} draws recorded yet — nothing to train on` };
-        }
-    
-        /**
-         * Never predict past a draw whose result is not recorded yet. Otherwise the
-         * prediction would skip that draw and silently train on stale history (the
-         * defect where a 23 Sep prediction was produced before the 22 Sep draw).
-         */
-        const nextRecorded = addDaysIso(latestRecorded, 1);
-        if (predictionDate > nextRecorded) {
-          return {
-            success: false,
-            error: `Cannot generate a prediction for ${predictionDate}: the preceding ${drawType} draw (${nextRecorded}) has no recorded result yet. Record that draw first.`,
-          };
-        }
-    
-        const draws = allDraws.filter((d) => d.drawDate < predictionDate);
-    
-        if (draws.length < m.lookbackWindow) {
-          return { success: false, error: `Not enough historical data before ${predictionDate}. Need ${m.lookbackWindow}, have ${draws.length}` };
-        }
-    
-    // Generate prediction with the active model's strategy, using ONLY draws
-    // strictly before the prediction date.
-    let mainNumbers: number[];
-    let boosterBall: number;
-    let trainingCutoff: string;
-    let componentScoresJson: string;
-    let overallScore: number;
-
-    if (strategy === "hybrid") {
-      const hybrid = generateHybridPrediction(draws, weights, m.lookbackWindow, m.poolSize);
-      mainNumbers = hybrid.mainNumbers;
-      boosterBall = hybrid.boosterBall;
-      trainingCutoff = hybrid.trainingCutoff;
-      componentScoresJson = JSON.stringify(hybridPredictionToJson(hybrid));
-      const selected = hybrid.componentScores.filter((s) => mainNumbers.includes(s.number));
-      overallScore = selected.length > 0 ? selected.reduce((sum, s) => sum + s.overallScore, 0) / selected.length : 0;
-    } else if (strategy === "superhybrid3") {
-      trainingCutoff = draws[draws.length - 1].drawDate;
-      const previousPredictions = await db
-        .select()
-        .from(uk49sPredictions)
-        .where(eq(uk49sPredictions.drawType, drawType))
-        .orderBy(desc(uk49sPredictions.createdAt))
-        .limit(20)
-        .then((rows) => rows.map((p) => ({
-          main: [p.predictedMain1, p.predictedMain2, p.predictedMain3, p.predictedMain4],
-          bonus: p.predictedBooster,
-        })));
-
-      const v3 = generateSuperHybrid3Prediction(
-        draws,
-        weights,
-        m.lookbackWindow,
-        {
-          previousPredictions,
-          candidatePoolSize: m.poolSize,
-        }
-      );
-      mainNumbers = v3.mainNumbers;
-      boosterBall = v3.boosterBall;
-      componentScoresJson = JSON.stringify({
-        strategy: "superhybrid3",
-        mainNumbers,
-        boosterBall,
-        score: v3.score,
-        candidatePool: v3.candidatePool,
-        trainingCutoff,
-      });
-      const selected = v3.candidatePool?.filter((c) => mainNumbers.includes(c.n)) ?? [];
-      overallScore = selected.length > 0 ? selected.reduce((sum, c) => sum + c.score, 0) / selected.length : 0;
-    } else {
-      const prediction: PredictionResult = generatePrediction(
-        draws,
-        drawType,
-        weights,
-        m.lookbackWindow,
-        constraints,
-        modelId
-      );
-      mainNumbers = prediction.mainNumbers;
-      boosterBall = prediction.boosterBall;
-      trainingCutoff = prediction.trainingCutoff;
-      componentScoresJson = JSON.stringify(predictionToJson(prediction));
-      const selected = prediction.componentScores.filter((s) => mainNumbers.includes(s.number));
-      overallScore = selected.length > 0 ? selected.reduce((sum, s) => sum + s.overallScore, 0) / selected.length : 0;
+    if (!latestRecorded) {
+      return { success: false, error: `No ${drawType} draws recorded yet — nothing to train on` };
     }
-    
-    // Store prediction
-    const [storedPrediction] = await db.insert(uk49sPredictions).values({
-      drawType,
-      predictionDate,
-      predictedMain1: mainNumbers[0],
-      predictedMain2: mainNumbers[1],
-      predictedMain3: mainNumbers[2],
-      predictedMain4: mainNumbers[3],
-      predictedBooster: boosterBall,
-      modelConfigId: modelId,
-      trainingCutoff,
-      componentScores: componentScoresJson,
-      overallScore,
-      status: "pending",
-    }).returning();
-    
-    // Try to match with actual result if available
+
+    /**
+     * Never predict past a draw whose result is not recorded yet, otherwise the
+     * prediction would silently train on stale history.
+     */
+    const nextRecorded = addDaysIso(latestRecorded, 1);
+    if (predictionDate > nextRecorded) {
+      return {
+        success: false,
+        error: `Cannot generate a prediction for ${predictionDate}: the preceding ${drawType} draw (${nextRecorded}) has no recorded result yet. Record that draw first.`,
+      };
+    }
+
+    const trainingDraws = allDraws.filter((d) => d.drawDate < predictionDate);
+    if (trainingDraws.length < MIN_TRAIN) {
+      return {
+        success: false,
+        error: `Not enough historical data before ${predictionDate}. Need ${MIN_TRAIN}, have ${trainingDraws.length}`,
+      };
+    }
+
+    const activeModel = await getActiveModel(drawType);
+    const weights = activeModel?.weights ?? DEFAULT_WEIGHTS;
+    const engineDraws = toEngineDraws(trainingDraws, drawType);
+
+    const [set] = buildPredictions({
+      draws: engineDraws,
+      targetDate: predictionDate,
+      drawTime: drawType === "lunchtime" ? "12:30" : "17:49",
+      sets: 1,
+      weights,
+    });
+
+    if (!set) {
+      return { success: false, error: "The engine could not produce a balanced line for this history" };
+    }
+
+    const trainingCutoff = trainingDraws[trainingDraws.length - 1].drawDate;
+
+    const [storedPrediction] = await db
+      .insert(uk49sPredictions)
+      .values({
+        drawType,
+        predictionDate,
+        predictedMain1: set.numbers[0],
+        predictedMain2: set.numbers[1],
+        predictedMain3: set.numbers[2],
+        predictedMain4: set.numbers[3],
+        predictedBooster: set.bonus_numbers[0],
+        modelConfigId: activeModel?.id ?? null,
+        trainingCutoff,
+        componentScores: JSON.stringify({ method: set.method, confidence: set.confidence, weights }),
+        overallScore: set.confidence,
+        status: "pending",
+      })
+      .returning();
+
     await matchPredictionWithResult(storedPrediction.id);
-    
-    return {
-      success: true,
-      prediction: await getPredictionInfo(storedPrediction.id),
-    };
-    
+
+    return { success: true, prediction: await getPredictionInfo(storedPrediction.id) };
   } catch (error) {
     logger.error({ error, drawType, predictionDate }, "Failed to generate prediction");
     return { success: false, error: error instanceof Error ? error.message : "Unknown error" };
   }
 }
 
-// Match prediction with actual result
+/** Matches a pending prediction against its actual draw, when recorded. */
 export async function matchPredictionWithResult(predictionId: number): Promise<void> {
   const prediction = await db
     .select()
     .from(uk49sPredictions)
     .where(eq(uk49sPredictions.id, predictionId))
     .limit(1);
-  
+
   if (prediction.length === 0) return;
-  
   const p = prediction[0];
-  
-  // Find actual draw for this date
+
   const actualDraw = await db
     .select()
     .from(uk49sDraws)
-    .where(and(
-      eq(uk49sDraws.drawDate, p.predictionDate),
-      eq(uk49sDraws.drawType, p.drawType)
-    ))
+    .where(and(eq(uk49sDraws.drawDate, p.predictionDate), eq(uk49sDraws.drawType, p.drawType)))
     .limit(1);
-  
-  if (actualDraw.length === 0) return; // No result yet
-  
+
+  if (actualDraw.length === 0) return;
+
   const draw = actualDraw[0];
   const actualMain = drawToNumbers(draw).main;
-  
-  // Calculate hits
   const predictedMain = [p.predictedMain1, p.predictedMain2, p.predictedMain3, p.predictedMain4];
-  const mainHits = predictedMain.filter(n => actualMain.includes(n)).length;
+  const mainHits = predictedMain.filter((n) => actualMain.includes(n)).length;
   const boosterHit = p.predictedBooster === draw.boosterBall;
-  
-  // Update prediction
-  await db.update(uk49sPredictions)
+
+  await db
+    .update(uk49sPredictions)
     .set({
       matchedDrawId: draw.id,
       actualMain1: actualMain[0],
@@ -430,13 +391,12 @@ export async function matchPredictionWithResult(predictionId: number): Promise<v
       actualBooster: draw.boosterBall,
       mainHits,
       boosterHit,
-      status: mainHits >= 4 || boosterHit ? "matched" : "matched",
+      status: "matched",
       updatedAt: new Date(),
     })
     .where(eq(uk49sPredictions.id, predictionId));
 }
 
-// Get prediction info by ID
 export async function getPredictionInfo(predictionId: number): Promise<PredictionInfo | null> {
   const prediction = await db
     .select({
@@ -461,16 +421,14 @@ export async function getPredictionInfo(predictionId: number): Promise<Predictio
       actualMain6: uk49sPredictions.actualMain6,
       actualBooster: uk49sPredictions.actualBooster,
       createdAt: uk49sPredictions.createdAt,
-      modelVersion: uk49sModelConfigs.version,
     })
     .from(uk49sPredictions)
-    .leftJoin(uk49sModelConfigs, eq(uk49sPredictions.modelConfigId, uk49sModelConfigs.id))
     .where(eq(uk49sPredictions.id, predictionId))
     .limit(1);
-  
+
   if (prediction.length === 0) return null;
-  
   const p = prediction[0];
+
   return {
     id: p.id,
     drawType: p.drawType,
@@ -478,18 +436,19 @@ export async function getPredictionInfo(predictionId: number): Promise<Predictio
     predictedMain: [p.predictedMain1, p.predictedMain2, p.predictedMain3, p.predictedMain4],
     predictedBooster: p.predictedBooster,
     modelConfigId: p.modelConfigId,
-    modelVersion: p.modelVersion,
     trainingCutoff: p.trainingCutoff,
     status: p.status,
     mainHits: p.mainHits,
     boosterHit: p.boosterHit,
-    actualMain: p.actualMain1 ? [p.actualMain1, p.actualMain2!, p.actualMain3!, p.actualMain4!, p.actualMain5!, p.actualMain6!] : null,
+    actualMain:
+      p.actualMain1 !== null
+        ? [p.actualMain1, p.actualMain2!, p.actualMain3!, p.actualMain4!, p.actualMain5!, p.actualMain6!]
+        : null,
     actualBooster: p.actualBooster,
     createdAt: p.createdAt,
   };
 }
 
-// Get latest prediction
 export async function getLatestPrediction(drawType: DrawType): Promise<PredictionInfo | null> {
   const prediction = await db
     .select()
@@ -497,140 +456,29 @@ export async function getLatestPrediction(drawType: DrawType): Promise<Predictio
     .where(eq(uk49sPredictions.drawType, drawType))
     .orderBy(desc(uk49sPredictions.predictionDate))
     .limit(1);
-  
+
   if (prediction.length === 0) return null;
-  
   return getPredictionInfo(prediction[0].id);
 }
 
-// Get prediction history
 export async function getPredictionHistory(
   drawType: DrawType,
   limit = 50,
   offset = 0,
-  since: Date | null = null
+  since: Date | null = null,
 ): Promise<PredictionInfo[]> {
-  // `since` scopes the history to the current active model so statistics from a
-  // previous model are no longer counted (see lib/stats-scope.ts).
   const predictions = await db
     .select()
     .from(uk49sPredictions)
     .where(
       since
         ? and(eq(uk49sPredictions.drawType, drawType), gte(uk49sPredictions.createdAt, since))
-        : eq(uk49sPredictions.drawType, drawType)
+        : eq(uk49sPredictions.drawType, drawType),
     )
     .orderBy(desc(uk49sPredictions.predictionDate))
     .limit(limit)
     .offset(offset);
-  
-  const infos = await Promise.all(predictions.map(p => getPredictionInfo(p.id)));
+
+  const infos = await Promise.all(predictions.map((p) => getPredictionInfo(p.id)));
   return infos.filter((p): p is PredictionInfo => p !== null);
-}
-
-// Update model with optimization results
-export async function updateActiveModel(
-  drawType: DrawType,
-  weights: FeatureWeights,
-  lookbackWindow: number,
-  constraints: DiversityConstraints,
-  validation4HitRate: number,
-  validationAvgHits: number,
-  validationSampleSize: number,
-  options: { strategy?: PredictionStrategy; poolSize?: number } = {}
-): Promise<number> {
-  const strategy: PredictionStrategy = options.strategy ?? "superhybrid";
-  const poolSize = options.poolSize ?? DEFAULT_HYBRID_POOL_SIZE;
-
-  // Archive current active model
-  await db.update(uk49sModelConfigs)
-    .set({ status: "archived", updatedAt: new Date() })
-    .where(and(
-      eq(uk49sModelConfigs.drawType, drawType),
-      eq(uk49sModelConfigs.status, "active")
-    ));
-  
-  // Create new model
-  const version = `v${Date.now()}`;
-  const [newModel] = await db.insert(uk49sModelConfigs).values({
-    drawType,
-    version,
-    status: "active",
-    strategy,
-    poolSize,
-    weightFrequency: weights.weightFrequency,
-    weightRecency: weights.weightRecency,
-    weightHotCold: weights.weightHotCold,
-    weightGapAnalysis: weights.weightGapAnalysis,
-    weightPairs: weights.weightPairs,
-    weightTriples: weights.weightTriples,
-    weightConsecutive: weights.weightConsecutive,
-    weightOddEven: weights.weightOddEven,
-    weightLowHigh: weights.weightLowHigh,
-    weightSumRange: weights.weightSumRange,
-    weightPositional: weights.weightPositional,
-    weightRepeat: weights.weightRepeat,
-    weightFirst3Minus2: weights.weightFirst3Minus2,
-    weightBonusInfluence: weights.weightBonusInfluence,
-    weightMomentum: weights.weightMomentum,
-    weightNeighbour: weights.weightNeighbour,
-    lookbackWindow,
-    enforceDiversity: constraints.enforceDiversity,
-    minNumberSpread: constraints.minNumberSpread,
-    maxSameGroup: constraints.maxSameGroup,
-    validation4HitRate,
-    validationAvgHits,
-    validationSampleSize,
-    description: strategy === "hybrid" ? `Optimized Super Hybrid (freq/gap/bonus) model` : `Optimized SuperHybrid model`,
-  }).returning();
-  
-  return newModel.id;
-}
-
-// Get all model versions
-export async function getModelHistory(drawType: DrawType): Promise<ModelInfo[]> {
-  const models = await db
-    .select()
-    .from(uk49sModelConfigs)
-    .where(eq(uk49sModelConfigs.drawType, drawType))
-    .orderBy(desc(uk49sModelConfigs.createdAt));
-  
-  return models.map(m => ({
-    id: m.id,
-    drawType: m.drawType,
-    version: m.version,
-    status: m.status,
-    strategy: isPredictionStrategy(m.strategy) ? m.strategy : "superhybrid",
-    poolSize: m.poolSize,
-    weights: {
-      weightFrequency: m.weightFrequency,
-      weightRecency: m.weightRecency,
-      weightHotCold: m.weightHotCold,
-      weightGapAnalysis: m.weightGapAnalysis,
-      weightPairs: m.weightPairs,
-      weightTriples: m.weightTriples,
-      weightConsecutive: m.weightConsecutive,
-      weightOddEven: m.weightOddEven,
-      weightLowHigh: m.weightLowHigh,
-      weightSumRange: m.weightSumRange,
-      weightPositional: m.weightPositional,
-      weightRepeat: m.weightRepeat,
-      weightFirst3Minus2: m.weightFirst3Minus2,
-      weightBonusInfluence: m.weightBonusInfluence,
-      weightMomentum: m.weightMomentum,
-      weightNeighbour: m.weightNeighbour,
-    },
-    lookbackWindow: m.lookbackWindow,
-    constraints: {
-      enforceDiversity: m.enforceDiversity,
-      minNumberSpread: m.minNumberSpread,
-      maxSameGroup: m.maxSameGroup,
-    },
-    trainingCutoff: m.trainingCutoff,
-    validation4HitRate: m.validation4HitRate,
-    validationAvgHits: m.validationAvgHits,
-    validationSampleSize: m.validationSampleSize,
-    createdAt: m.createdAt,
-    updatedAt: m.updatedAt,
-  }));
 }

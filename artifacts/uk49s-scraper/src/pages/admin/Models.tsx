@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Boxes } from 'lucide-react';
-import { api, type DrawType } from '@/lib/api';
+import { api, type DrawType, type EngineWeights } from '@/lib/api';
 import { useAsync, formatDate } from '@/lib/useAsync';
 import {
   Badge,
@@ -11,8 +11,10 @@ import {
   ProgressBar,
   Spinner,
   Tabs,
-  percent,
 } from '@/components/ui';
+
+/** The engine's tunable weights, in a stable display order. */
+const WEIGHT_ORDER: (keyof EngineWeights)[] = ['hot', 'overdue', 'halfLife', 'power'];
 
 export default function AdminModels() {
   const [drawType, setDrawType] = useState<DrawType>('lunchtime');
@@ -20,8 +22,8 @@ export default function AdminModels() {
   const history = useAsync(() => api.getModelHistory(drawType), [drawType]);
 
   const model = active.data?.model;
-  const weights = model ? Object.entries(model.weights).sort((a, b) => b[1] - a[1]) : [];
-  const maxWeight = weights.length ? Math.max(...weights.map(([, v]) => v)) : 1;
+  const weightEntries = model ? WEIGHT_ORDER.map((key) => [key, model.weights[key]] as const) : [];
+  const maxWeight = weightEntries.length ? Math.max(...weightEntries.map(([, v]) => v)) : 1;
 
   return (
     <div className="space-y-6">
@@ -30,7 +32,7 @@ export default function AdminModels() {
           <p className="eyebrow">Administration</p>
           <h1 className="mt-1.5 text-[26px] font-semibold tracking-[-0.02em]">Models</h1>
           <p className="mt-1 text-[13px] text-[var(--text-3)]">
-            The active model and its configuration history for each session.
+            The locked champion weights for each session, tuned by the walk-forward optimizer.
           </p>
         </div>
         <Tabs
@@ -46,70 +48,61 @@ export default function AdminModels() {
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <PanelHeader
-            title="Active model"
-            subtitle={model ? `Version ${model.version}` : 'No active model'}
+            title="Active champion"
+            subtitle={model && model.id !== null ? `Version ${model.version}` : 'Engine defaults'}
             right={<Boxes size={16} className="text-[var(--text-3)]" />}
           />
           {active.loading ? (
             <Spinner />
           ) : active.error ? (
             <ErrorState message={active.error} onRetry={active.reload} />
-          ) : !model ? (
-            <EmptyState title="No active model" description="A model is created once validated history exists." />
+          ) : !model || model.id === null ? (
+            <EmptyState
+              title="No tuned champion yet"
+              description="The engine uses its default weights until the optimizer locks a champion."
+            />
           ) : (
             <div className="space-y-5 p-5">
               <div className="flex flex-wrap gap-2">
-                              <Badge tone="mint">{model.status}</Badge>
-                              <Badge tone="violet">
-                                {model.strategy === 'hybrid'
-                                  ? 'Super Hybrid (Freq · Gap · Bonus)'
-                                  : model.strategy === 'superhybrid3'
-                                    ? 'SuperHybrid v3 (Overdue · Momentum · Neighbours)'
-                                    : 'SuperHybrid (13 features)'}
-                              </Badge>
-                              <Badge tone="sky">{model.lookbackWindow} draw lookback</Badge>
-                              {model.strategy !== 'superhybrid' ? <Badge>pool {model.poolSize ?? '—'}</Badge> : null}
-                              {model.trainingCutoff ? <Badge>cutoff {formatDate(model.trainingCutoff)}</Badge> : null}
-                            </div>
+                <Badge tone="mint">base44</Badge>
+                <Badge tone={model.targetMet ? 'mint' : 'neutral'}>
+                  {model.targetMet ? 'target met' : 'below target'}
+                </Badge>
+                <Badge tone="sky">4-number line + booster</Badge>
+                {model.candidatesTested != null ? (
+                  <Badge>{model.candidatesTested} candidates</Badge>
+                ) : null}
+              </div>
 
               <div className="grid grid-cols-3 gap-4">
                 <div>
-                  <p className="eyebrow">Validation 4-hit</p>
-                  <p className="stat-value-sm mt-1">{percent(model.validationMetrics?.fourHitRate ?? null)}</p>
+                  <p className="eyebrow">3+ draws</p>
+                  <p className="stat-value-sm mt-1">{model.threePlusCount ?? '—'}</p>
                 </div>
                 <div>
-                  <p className="eyebrow">Validation avg</p>
+                  <p className="eyebrow">Avg hits</p>
                   <p className="stat-value-sm mt-1">
-                    {model.validationMetrics?.avgHits != null ? model.validationMetrics.avgHits.toFixed(2) : '—'}
+                    {model.avgHitsPerLine != null ? model.avgHitsPerLine.toFixed(3) : '—'}
                   </p>
                 </div>
                 <div>
-                  <p className="eyebrow">Sample size</p>
-                  <p className="stat-value-sm mt-1">{model.validationMetrics?.sampleSize ?? '—'}</p>
+                  <p className="eyebrow">Locked</p>
+                  <p className="stat-value-sm mt-1">{model.createdAt ? formatDate(model.createdAt) : '—'}</p>
                 </div>
               </div>
 
               <div>
-                <p className="eyebrow">Constraints</p>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <Badge tone={model.constraints?.enforceDiversity ? 'mint' : 'neutral'}>
-                    diversity {model.constraints?.enforceDiversity ? 'on' : 'off'}
-                  </Badge>
-                  <Badge>spread ≥ {model.constraints?.minNumberSpread ?? '—'}</Badge>
-                  <Badge>max same group {model.constraints?.maxSameGroup ?? '—'}</Badge>
-                </div>
-              </div>
-
-              <div>
-                <p className="eyebrow">Feature weights</p>
+                <p className="eyebrow">Engine weights</p>
                 <div className="mt-3 space-y-2">
-                  {weights.map(([name, value]) => (
+                  {weightEntries.map(([name, value]) => (
                     <div key={name} className="flex items-center gap-3">
-                      <span className="w-28 truncate text-[11.5px] text-[var(--text-3)]">{name}</span>
+                      <span className="w-20 truncate text-[11.5px] text-[var(--text-3)]">{name}</span>
                       <div className="flex-1">
                         <ProgressBar value={(value / maxWeight) * 100} tone="gold" />
                       </div>
-                      <span className="mono w-12 text-right text-[11.5px] text-[var(--text-2)]">{value.toFixed(3)}</span>
+                      <span className="mono w-12 text-right text-[11.5px] text-[var(--text-2)]">
+                        {value.toFixed(2)}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -119,45 +112,39 @@ export default function AdminModels() {
         </Card>
 
         <Card className="overflow-hidden">
-          <PanelHeader title="Model history" subtitle="Every configuration" />
+          <PanelHeader title="Champion history" subtitle="Every locked weight set" />
           {history.loading ? (
             <Spinner />
           ) : !history.data?.models?.length ? (
-            <EmptyState title="No model history" description="Configurations appear here as models are trained." />
+            <EmptyState title="No champion history" description="Weight sets appear here as the optimizer locks them." />
           ) : (
             <div className="overflow-x-auto">
               <table className="table">
                 <thead>
                   <tr>
-                                      <th>Version</th>
-                                      <th>Strategy</th>
-                                      <th>Status</th>
-                                      <th>Lookback</th>
-                                      <th>Val. avg</th>
-                                      <th>Val. 4-hit</th>
-                                      <th>Created</th>
-                                    </tr>
+                    <th>Version</th>
+                    <th>Status</th>
+                    <th>hot</th>
+                    <th>halfLife</th>
+                    <th>power</th>
+                    <th>3+</th>
+                    <th>Created</th>
+                  </tr>
                 </thead>
                 <tbody>
                   {history.data.models.map((item) => (
-                    <tr key={item.id}>
+                    <tr key={`${item.id}-${item.version}`}>
                       <td className="strong mono">{item.version}</td>
-                                            <td className="text-[11.5px] text-[var(--text-3)]">
-                                              {item.strategy === 'hybrid'
-                                                ? 'Super Hybrid'
-                                                : item.strategy === 'superhybrid3'
-                                                  ? 'SuperHybrid v3'
-                                                  : 'SuperHybrid'}
-                                            </td>
-                                            <td>
-                                              <Badge tone={item.status === 'active' ? 'mint' : 'neutral'}>{item.status}</Badge>
-                                            </td>
-                      <td className="mono">{item.lookbackWindow}</td>
-                      <td className="mono">
-                        {item.validationMetrics?.avgHits != null ? item.validationMetrics.avgHits.toFixed(2) : '—'}
+                      <td>
+                        <Badge tone={item.targetMet ? 'mint' : 'neutral'}>
+                          {item.targetMet ? 'target met' : 'locked'}
+                        </Badge>
                       </td>
-                      <td className="mono">{percent(item.validationMetrics?.fourHitRate ?? null)}</td>
-                      <td>{formatDate(item.createdAt)}</td>
+                      <td className="mono">{item.weights.hot.toFixed(2)}</td>
+                      <td className="mono">{item.weights.halfLife}</td>
+                      <td className="mono">{item.weights.power.toFixed(2)}</td>
+                      <td className="mono">{item.threePlusCount ?? '—'}</td>
+                      <td>{item.createdAt ? formatDate(item.createdAt) : '—'}</td>
                     </tr>
                   ))}
                 </tbody>

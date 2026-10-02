@@ -1,7 +1,3 @@
-// UK49s Platform Tables
+// UK49s platform tables and the single prediction engine.
 export * from "./uk49s";
-export * from "./feature-engine";
-export * from "./hybrid-strategy";
-export * from "./superhybrid3-strategy";
-export * from "./backtest-engine";
-export * from "./optimizer-engine";
+export * from "./base44-engine";
