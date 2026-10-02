@@ -79,13 +79,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let active = true;
 
     (async () => {
-      // Bound the session restore so a hanging auth call cannot wedge startup.
-      const result = await Promise.race([
-        supabase.auth.getSession(),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), AUTH_TIMEOUT_MS)),
-      ]);
+      // Bound the session restore so a hanging auth call cannot wedge startup,
+      // and swallow rejections (e.g. "Failed to fetch" when Supabase is
+      // unreachable) so loading ALWAYS clears.
+      let nextSession: Session | null = null;
+      try {
+        const result = await Promise.race([
+          supabase.auth.getSession(),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), AUTH_TIMEOUT_MS)),
+        ]);
+        nextSession = result?.data?.session ?? null;
+      } catch {
+        nextSession = null;
+      }
       if (!active) return;
-      const nextSession = result?.data?.session ?? null;
       setSession(nextSession);
       setLoading(false);
       if (nextSession?.user) {
@@ -93,7 +100,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } else {
         setProfileLoading(false);
       }
-    })();
+    })().catch(() => {
+      // Last-resort guard: never leave the app on the loading screen.
+      if (active) setLoading(false);
+    });
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
@@ -112,31 +122,48 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [loadProfile]);
 
   const signIn = useCallback(async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    return { error: error ? error.message : null };
+    try {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      return { error: error ? error.message : null };
+    } catch {
+      return { error: 'Could not reach the sign-in service. Please try again.' };
+    }
   }, []);
 
   const signUp = useCallback(async (email: string, password: string, fullName: string) => {
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: { data: { full_name: fullName } },
-    });
-    return {
-      error: error ? error.message : null,
-      needsConfirmation: !error && !data.session,
-    };
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { data: { full_name: fullName } },
+      });
+      return {
+        error: error ? error.message : null,
+        needsConfirmation: !error && !data.session,
+      };
+    } catch {
+      return { error: 'Could not reach the sign-up service. Please try again.', needsConfirmation: false };
+    }
   }, []);
 
   const signOut = useCallback(async () => {
-    await supabase.auth.signOut();
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      // Ignore network failures — clear local state regardless.
+    }
     setProfile(null);
     setProfileLoading(false);
   }, []);
 
   const refreshProfile = useCallback(async () => {
-    const { data } = await supabase.auth.getSession();
-    if (data.session?.user) await loadProfile(data.session.user.id);
+    try {
+      const { data } = await supabase.auth.getSession();
+      if (data.session?.user) await loadProfile(data.session.user.id);
+    } catch {
+      setProfile(null);
+      setProfileLoading(false);
+    }
   }, [loadProfile]);
 
   const value = useMemo<AuthState>(
