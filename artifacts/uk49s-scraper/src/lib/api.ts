@@ -173,6 +173,109 @@ export interface BacktestHistoryItem {
   completedAt: string | null;
 }
 
+/** The SuperHybrid strategy's eight configurable weights. */
+export interface SuperHybridWeights {
+  existingModel: number;
+  crossSession: number;
+  frequency: number;
+  recency: number;
+  gap: number;
+  pair: number;
+  flipFlop: number;
+  pattern: number;
+}
+
+export interface SuperHybridConfig {
+  id: number | null;
+  drawType: DrawType;
+  strategy: 'superhybrid';
+  version: string;
+  weights: SuperHybridWeights;
+  lookback: number;
+  createdAt: string | null;
+}
+
+export interface SuperHybridSource {
+  drawType: DrawType;
+  draw_date: string;
+  draw_time: string;
+  numbers: number[];
+  bonus_numbers: number[];
+}
+
+export interface SuperHybridLivePrediction {
+  drawType: DrawType;
+  targetDate: string;
+  source: SuperHybridSource;
+  numbers: number[];
+  bonus_numbers: number[];
+  confidence: number;
+  contributions: SuperHybridWeights;
+  version: string;
+  modelConfigId: number | null;
+  sourceLabel: string;
+}
+
+export interface SuperHybridSessionMetrics {
+  testedDraws: number;
+  avgHits: number;
+  bestHits: number;
+  fourHitCount: number;
+  fourHitRate: number;
+  boosterRate: number;
+  randomAvgHits: number;
+  frequencyAvgHits: number;
+  randomBoosterRate: number;
+  frequencyBoosterRate: number;
+  edgeVsRandom: number;
+  edgeVsFrequency: number;
+  hitDistribution: { hits: number; lines: number; pct: number }[];
+}
+
+export interface SuperHybridRun {
+  target_date: string;
+  target_session: DrawType;
+  source_session: DrawType;
+  source_date: string;
+  source_numbers: number[];
+  predicted: number[];
+  predicted_booster: number;
+  actual: number[];
+  actual_booster: number;
+  mainHits: number;
+  boosterHit: boolean;
+  confidence: number;
+  contributions: SuperHybridWeights;
+  randomHits: number;
+  frequencyHits: number;
+  randomBoosterHit: boolean;
+  frequencyBoosterHit: boolean;
+}
+
+export interface SuperHybridReport {
+  strategy: 'superhybrid';
+  version: string;
+  weights: SuperHybridWeights;
+  testedDraws: number;
+  historyPerRun: number;
+  linesPerDraw: number;
+  overall: SuperHybridSessionMetrics;
+  bySession: Record<DrawType, SuperHybridSessionMetrics>;
+  directions: { lunchToTea: SuperHybridSessionMetrics; teaToLunch: SuperHybridSessionMetrics };
+  diagnostics: { component: keyof SuperHybridWeights; average: number }[];
+  examples: { lunchToTea: SuperHybridRun | null; teaToLunch: SuperHybridRun | null };
+  runs: SuperHybridRun[];
+}
+
+export interface SuperHybridModelMeta {
+  strategy: string;
+  version: string;
+  modelConfigId: number | null;
+  lookback: number;
+  targetSession: DrawType | 'both';
+  sourceSession: string;
+}
+
 export interface OptimizerRunItem {
   id: number;
   drawType?: DrawType;
@@ -339,6 +442,23 @@ export const api = {
   getBacktestHistory: (drawType: DrawType) =>
     get<{ success: boolean; count: number; statsSince?: string | null; backtests: BacktestHistoryItem[] }>(
       `/api/backtest/history/${drawType}`,
+    ),
+  getSuperHybridConfig: (drawType: DrawType) =>
+    get<{ success: boolean; config: SuperHybridConfig }>(`/api/superhybrid/config/${drawType}`),
+  getSuperHybridPrediction: (drawType: DrawType) =>
+    get<{ success: boolean; prediction?: SuperHybridLivePrediction; error?: string }>(
+      `/api/superhybrid/prediction/${drawType}`,
+    ),
+  runSuperHybridBacktest: (body: {
+    drawType?: DrawType | null;
+    startDate?: string;
+    endDate?: string;
+    maxTests?: number;
+    weights?: Partial<SuperHybridWeights>;
+  }) =>
+    adminPost<{ success: boolean; model: SuperHybridModelMeta; report: SuperHybridReport }>(
+      '/api/superhybrid/backtest',
+      body,
     ),
   getOptimizerHistory: (drawType: DrawType) =>
     get<{ success: boolean; count: number; target: number; candidates: number; optimizationRuns: OptimizerRunItem[] }>(

@@ -132,7 +132,7 @@ export function scoreNumbers(
   return stats;
 }
 
-function weightedSample(pool: NumberStat[], take: number, rand: () => number, power: number): number[] {
+export function weightedSample(pool: NumberStat[], take: number, rand: () => number, power: number): number[] {
   const items = pool.map((s) => ({ ...s, w: Math.pow(Math.max(s.score, 0.05), power) }));
   const picked: number[] = [];
   while (picked.length < take && items.length) {

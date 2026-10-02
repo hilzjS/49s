@@ -31,8 +31,9 @@ import {
   type Base44Weights,
   type DrawType,
   type BacktestReport,
+  SUPERHYBRID_STRATEGY,
 } from "@workspace/db/schema";
-import { eq, and, desc, asc, gte } from "drizzle-orm";
+import { eq, and, desc, asc, gte, ne } from "drizzle-orm";
 import { logger } from "./logger";
 
 export interface ModelInfo {
@@ -234,12 +235,16 @@ export async function lockChampion(
   return model.id;
 }
 
-/** All model versions for a draw type, newest first. */
+/**
+ * All model versions for a draw type, newest first. SuperHybrid configs are
+ * excluded — they are a separate strategy with their own weights, so they must
+ * never be presented as (or confused with) the Base44 champion history.
+ */
 export async function getModelHistory(drawType: DrawType): Promise<ModelInfo[]> {
   const rows = await db
     .select()
     .from(uk49sModelConfigs)
-    .where(eq(uk49sModelConfigs.drawType, drawType))
+    .where(and(eq(uk49sModelConfigs.drawType, drawType), ne(uk49sModelConfigs.strategy, SUPERHYBRID_STRATEGY)))
     .orderBy(desc(uk49sModelConfigs.createdAt));
 
   return rows.map((m) => {
