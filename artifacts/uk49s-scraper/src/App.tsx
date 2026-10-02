@@ -16,6 +16,7 @@ import Subscription from '@/pages/app/Subscription';
 import AdminOverview from '@/pages/admin/Overview';
 import AdminScraper from '@/pages/admin/Scraper';
 import AdminModels from '@/pages/admin/Models';
+import AdminBacktesting from '@/pages/admin/Backtesting';
 import AdminUsers from '@/pages/admin/Users';
 import AdminPayments from '@/pages/admin/Payments';
 import AdminSettings from '@/pages/admin/Settings';
@@ -43,6 +44,7 @@ function Router() {
         <Route path="/admin">{() => <AdminShell><AdminOverview /></AdminShell>}</Route>
         <Route path="/admin/scraper">{() => <AdminShell><AdminScraper /></AdminShell>}</Route>
         <Route path="/admin/models">{() => <AdminShell><AdminModels /></AdminShell>}</Route>
+        <Route path="/admin/backtesting">{() => <AdminShell><AdminBacktesting /></AdminShell>}</Route>
         <Route path="/admin/users">{() => <AdminShell><AdminUsers /></AdminShell>}</Route>
         <Route path="/admin/payments">{() => <AdminShell><AdminPayments /></AdminShell>}</Route>
         <Route path="/admin/settings">{() => <AdminShell><AdminSettings /></AdminShell>}</Route>
