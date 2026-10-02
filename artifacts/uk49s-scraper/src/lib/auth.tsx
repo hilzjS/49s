@@ -42,26 +42,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   const loadProfile = useCallback(async (userId: string) => {
-    const { data } = await supabase
-      .from('profiles')
-      .select('id, email, full_name, role, plan_id')
-      .eq('id', userId)
-      .maybeSingle();
-    setProfile((data as Profile | null) ?? null);
+    try {
+      const { data } = await supabase
+        .from('profiles')
+        .select('id, email, full_name, role, plan_id')
+        .eq('id', userId)
+        .maybeSingle();
+      setProfile((data as Profile | null) ?? null);
+    } catch {
+      // Supabase unreachable (e.g. offline or project disconnected): keep the
+      // session but fall back to a null profile so the app still renders.
+      setProfile(null);
+    }
   }, []);
 
   useEffect(() => {
     let active = true;
 
-    supabase.auth.getSession().then(({ data }) => {
-      if (!active) return;
-      setSession(data.session);
-      if (data.session?.user) {
-        loadProfile(data.session.user.id).finally(() => active && setLoading(false));
-      } else {
-        setLoading(false);
-      }
-    });
+    supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (!active) return;
+        setSession(data.session);
+        if (data.session?.user) {
+          loadProfile(data.session.user.id).finally(() => active && setLoading(false));
+        } else {
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        // Never leave the app stuck on the loading screen when auth is unreachable.
+        if (active) setLoading(false);
+      });
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       setSession(nextSession);
